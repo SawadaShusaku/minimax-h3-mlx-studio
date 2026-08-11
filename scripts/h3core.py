@@ -138,13 +138,17 @@ def mux(ev, out_path, metadata):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def make_strip(video_path, frames, out_path, tiles=4):
-    """動きが一目で分かるように、等間隔の数コマを横に並べた画像を作る。"""
+def make_strip(video_path, frames, out_path, tiles=4, width=200, quality=6):
+    """動きが一目で分かるように、等間隔の数コマを横に並べた画像を作る。
+
+    これは git で追跡する唯一の視覚的記録（動画は追跡しない）なので、
+    一覧で内容を判断できる下限まで小さくしてある。1枚およそ20KB。
+    """
     picks = [int(frames * i / tiles) for i in range(tiles)]
     expr = "+".join(f"eq(n\\,{n})" for n in picks)
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video_path),
-           "-vf", f"select='{expr}',scale=320:-1,tile={tiles}x1",
-           "-frames:v", "1", str(out_path)]
+           "-vf", f"select='{expr}',scale={width}:-1,tile={tiles}x1",
+           "-q:v", str(quality), "-frames:v", "1", str(out_path)]
     try:
         subprocess.run(cmd, check=True)
         return out_path

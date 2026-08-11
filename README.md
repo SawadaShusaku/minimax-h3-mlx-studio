@@ -1,116 +1,184 @@
-# minimax-h3-01
+# minimax-h3-mlx-studio
 
-MiniMax-H3（Hailuo 3.0）を Apple Silicon 上でローカル実行する環境。
-映像とステレオ音声を1パスで同時生成する。
+Run **MiniMax-H3 (Hailuo 3.0)** locally on Apple Silicon — video *and* its stereo
+soundtrack generated in a single pass — with a small web UI and a generation log
+that records what you ran, what actually ran, and how long it took.
 
-- 実行環境: Mac Studio / M4 Max / 128GB / macOS 26.6.1
-- ランタイム: [mlx-serve](https://github.com/ddalcu/mlx-serve) 26.8.4（Homebrew、Python不要）
-- モデル: [ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit](https://huggingface.co/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit)（65GB、8bit量子化）
+*[日本語版はこちら](README.ja.md)*
 
-## 構成
+> ### ⚠️ Territorial restriction on the model
+>
+> The MiniMax H3 Community License defines the Applicable Territory as
+> **worldwide EXCLUDING the European Union, the United Kingdom, the Republic of
+> Korea, and the United States of America**, and prohibits use, reproduction,
+> modification, distribution and display outside it.
+>
+> **No weights are distributed in this repository** — the code downloads them
+> from Hugging Face. Check whether your jurisdiction permits you to use these
+> files *before* downloading. This affects a large share of readers, so please
+> do not skip it.
 
-```
-minimax-h3-01/
-├── models/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit/   重み一式（65GB）
-├── scripts/serve.sh                                  mlx-serve 起動
-├── scripts/h3app.py                                  Webアプリ（生成＋履歴）
-├── scripts/h3gen.py                                  生成（CLI）
-├── scripts/h3hist.py                                 履歴の閲覧・評価・静的ギャラリー
-├── scripts/h3core.py                                 生成の実処理（共用）
-├── scripts/h3lib.py                                  履歴の読み書き（共用）
-├── scripts/h3view.py                                 CSS・カードのHTML（共用）
-├── web/htmx.min.js                                   同梱（CDN不要）
-├── outputs/                                          生成した動画
-├── history/history.jsonl                             全生成の記録（1行1件・追記のみ）
-├── history/gallery.html                              静的な一覧（再生成可能）
-└── logs/                                             ログ
-```
+---
 
-## 使い方（Webアプリ）
+## Why this exists
 
-mlx-serve を起動してから、アプリを起動する:
+Getting usable output from H3 on a Mac is less about the code than about four
+settings that are easy to get wrong. This repo carries the code, and — more
+usefully — **the measurements and the failures behind those settings**.
 
-```bash
-./scripts/serve.sh && ./scripts/h3app.py
-```
+The generation log includes a deliberately bad run with its analysis, because
+knowing *what breaks* turned out to be harder to find than knowing what works.
 
-`http://127.0.0.1:8765/` が開く。左のフォームで生成し、右に履歴が並ぶ。
+## Requirements
 
-- 生成中は経過・ステップ・**1ステップの実測から出した残り時間**が出る
-- 履歴カードの「この設定で作り直す」でフォームに設定が流し込まれる（`forked_from` に系譜が残る）
-- ★ボタンで評価。カードだけが差し替わる
-- 生成はGPUを占有するので**同時に1件のみ**。ブラウザを閉じても生成は続き、
-  開き直せば進行中のジョブに再接続する
-
-技術構成はPython標準ライブラリのHTTPサーバ＋HTMX。**ビルド工程も外部依存もない**
-（HTMXは `web/` に同梱）。画面はサーバがHTML断片を返してHTMXが差し替える方式で、
-カードの描画コードはPython側の1箇所（`h3view.card_html`）にしかない。
-進捗だけは値の更新なのでブラウザ標準の `EventSource` で受けている。
-
-## 使い方（CLI）
-
-mlx-serve を起動する:
-
-```bash
-./scripts/serve.sh
-```
-
-動画を生成する（`outputs/` に保存され、`history/history.jsonl` に自動で記録される）:
-
-```bash
-./scripts/h3gen.py --prompt "A girl on a grassy hilltop in a strong wind. overall_soundscape: gusting wind." --frames 124 --width 1024 --height 768 --steps 6 --turbo
-```
-
-過去の設定を引き継いで派生させる（変えたい項目だけ指定する）:
-
-```bash
-./scripts/h3gen.py --from 20260811-1523 --seed 42
-```
-
-停止する:
-
-```bash
-pkill -f 'mlx-serve --model'
-```
-
-## 履歴
-
-すべての生成が `history/history.jsonl` に1行1件で追記される。失敗も記録するので、
-避けるべき設定の根拠が残る。**送った値（`requested`）と実際に使われた値（`effective`）を
-両方持つ** — サーバはフレーム数を `17k+5` に丸め、`steps` を turbo の有無で変えるため、
-送った値だけでは再現できない。同じ内容が mp4 のコメント欄にも埋め込まれるので、
-動画ファイル単体でも設定が分かる。
-
-```bash
-./scripts/h3hist.py list                          # 一覧
-./scripts/h3hist.py list --search watercolor      # プロンプト本文で絞り込み
-./scripts/h3hist.py show 20260811-1523            # 1件の全項目
-./scripts/h3hist.py rate 20260811-1523 5 --notes "背景の質感が狙いどおり"
-./scripts/h3hist.py gallery --open                # 動画つき一覧をブラウザで開く
-```
-
-`gallery.html` は `history.jsonl` から毎回作り直す派生物なので、消しても失われない。
-評価とメモは追記される別レコードとして持ち、読み出し時に畳み込むため、
-付け直しても生成の記録そのものは書き換わらない。
-
-## パラメータの勘所
-
-| 項目 | 内容 |
+| | |
 |---|---|
-| `--frames` | `17k+5` の階段に丸められる（5, 22, 39, 56, 73, 90, 107…）。24fps なので 39=1.6秒、56=2.3秒、107=4.5秒 |
-| `--width` / `--height` | **32の倍数**必須。外すと 400 エラー |
-| `--turbo` | 4ステップ蒸留LoRAを使う（下限4ステップ）。付けないと既定30ステップで7倍以上遅い |
-| `overall_soundscape:` | プロンプト末尾にこう書くと、以降が音声の指示になる |
+| Hardware | Apple Silicon. Measurements here are from an **M4 Max / 128 GB** Mac Studio |
+| OS | macOS 26.2+ (required by mlx-serve) |
+| Runtime | [mlx-serve](https://github.com/ddalcu/mlx-serve) — a Zig server, **no Python needed** |
+| Model | [ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit](https://huggingface.co/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit) — 65 GB download |
+| Also | `ffmpeg` (muxing), Python 3.9+ (stdlib only — no pip install) |
 
-## 実測（M4 Max 128GB）
+**Memory:** the 65 GB of weights are *not* all resident at once. The text encoder
+(25.6 GB) is freed before the DiT (20 GB) loads, so the measured peak is
+**~28 GB**. A 32 GB Mac can run the 4-bit pack instead.
 
-- 960x544 / 39フレーム(1.62秒) / turbo 4ステップ → **約120〜134秒**
-- メモリ実効ピーク **約28GB**。text_encoder(25.6GB) を解放してから DiT(20GB) を載せる
-  段階ロードなので、ファイル合計65GBが同時に載ることはない
+## Setup
 
-## 注意
+```bash
+brew tap ddalcu/mlx-serve https://github.com/ddalcu/mlx-serve
+brew trust ddalcu/mlx-serve && brew install mlx-serve
+mlx-serve pull ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit   # 65 GB
+```
 
-- API（`POST /v1/video/generations`）が返すのは base64 の rgb8 生フレームと
-  pcm_s16le ステレオ音声で、mp4 ではない。`h3gen.py` が ffmpeg で束ねている
-- モデル本体のライセンスは MiniMax の独自ライセンス（EU等の地域制限あり）。
-  mlx-serve 自体は MIT
+`mlx-serve pull` always writes to `~/.mlx-serve/models/`. Move the pack into
+`models/` here (or point `scripts/serve.sh` at wherever you keep it).
+
+```bash
+./scripts/serve.sh      # start mlx-serve
+./scripts/h3app.py      # open the web UI at http://127.0.0.1:8765/
+```
+
+## The web UI
+
+Form on the left, progress and history on the right. Python **standard library
+only** plus a vendored copy of htmx — no build step, no `node_modules`, no venv.
+
+* Live progress with a **remaining-time estimate derived from the measured
+  seconds-per-step**, which matters when a run takes 20+ minutes
+* **"Rebuild with these settings"** on any past card refills the form and records
+  the lineage in `forked_from`
+* Star ratings and notes, stored as appended annotations
+* One generation at a time (it saturates the GPU). Closing the browser does not
+  stop it; reopening reattaches to the running job
+
+Prefer the terminal:
+
+```bash
+./scripts/h3gen.py --prompt "..." --frames 124 --width 1024 --height 768 --steps 6 --turbo
+./scripts/h3gen.py --from 20260811-1523 --seed 42     # inherit and vary
+./scripts/h3hist.py list
+./scripts/h3hist.py gallery --open
+```
+
+## Settings that actually decide quality
+
+Every one of these was learned by getting it wrong first. Miss them and output
+degrades in ways that look like model limitations but are not.
+
+| Setting | Use | Why |
+|---|---|---|
+| **Frames ≥ 124** | 124–362 | The trained range. Below 124 is off-distribution, not merely "short" |
+| **Short side 768** | `1024×768`, `768×768`, `1344×768` | `960×544` is below the model's native short edge |
+| **Steps 6–8** with turbo | 6 | The LoRA author's range. 4 is the floor, not a recommendation |
+| **LoRA strength 1.0** | default | Only adjust for a specific defect (0.8–0.95 over-sharp, 1.05–1.2 blurry) |
+
+**Frame counts sit on a `17k + 5` ladder** — 124, 141, 158 … 362. This is not
+arbitrary: H3's video VAE was trained on 17-frame clips (`CLIP_LENGTH = 17`,
+4× temporal compression → 5 latent tokens per chunk), and decoding walks those
+chunks with overlap and cross-fades. Off-ladder counts are silently snapped up,
+which is why the log records both requested and effective values. At 24 fps you
+cannot hit exactly 5.0 s — generate 124 frames (5.17 s) and trim afterwards.
+
+### A worked failure
+
+`960×544 / 107 frames / 4 steps` broke all four thresholds at once. The result:
+mottled noise frozen into flat background areas, mushy faces, malformed hands.
+The prompt made it worse by asking for `dynamic smear frames` and `fast camera
+push` — the LoRA documents motion smearing at 4 steps with heavy motion.
+
+Fixing the settings **and** describing the background concretely (an undescribed
+background invites residual noise to become the background) produced clean
+watercolor paper texture instead. Both runs are in `history/history.jsonl`.
+
+## Prompt shape
+
+Six blocks, in order. Style declaration first — it decides the domain, and a
+weak opening lets everything after it drift toward photorealism.
+
+```
+[style declaration]. [subject] in [place], [passive motion].
+Behind them, [2-3 concrete background layers].
+[linework], [color], [texture], [lighting].
+Camera [slow movement].
+overall_soundscape: [2-3 audio layers].
+```
+
+* Text after **`overall_soundscape:`** becomes the audio instruction
+* Prefer wind-driven motion over body motion — it buys movement at far lower risk
+* **Omit** `8k`, `hyperdetailed`, `octane render`, `masterpiece`. They pull toward
+  heavy rendering, which is usually the opposite of what you asked for
+* `soft even lighting` is worth stating: without it the model reaches for
+  cinematic lighting, a main source of the "AI look"
+
+## Measured timings (M4 Max, 128 GB, turbo)
+
+| Resolution | Frames | Steps | Time |
+|---|---|---|---|
+| 960×544 | 39 (1.6 s) | 4 | ~2 min |
+| 960×544 | 107 (4.5 s) | 4 | 7 min 28 s |
+| **1024×768** | **124 (5.2 s)** | **6** | **22 min 44 s** |
+
+Relative-cost labels like "1.8× slower" compare resolutions *at equal frame
+count*. Raising resolution and frame count together multiplies — an estimate of
+16 min came out at 23.
+
+## How the log works
+
+`history/history.jsonl`, one JSON object per line, append-only.
+
+* **`requested` and `effective` are both stored.** The server snaps frame counts
+  and changes the default step count depending on turbo, so the request alone
+  cannot reproduce a run
+* **Failures are recorded too** — that is where the thresholds above came from
+* Ratings and notes are *appended* as annotation records and folded in on read,
+  so re-rating never rewrites the original entry
+* The same metadata is embedded in each mp4's comment field, so a video that
+  travels alone still carries its settings (`ffprobe -show_entries format_tags=comment`)
+
+Not tracked by git: the weights (65 GB) and `outputs/` (videos grow without
+bound and git keeps every version forever). The 4-frame contact strips **are**
+tracked — roughly 20 KB each, and the only visual record that survives a clone.
+
+## Layout
+
+```
+scripts/h3app.py    web UI (stdlib HTTP server + htmx)
+scripts/h3core.py   generation, muxing, strips   — shared by CLI and UI
+scripts/h3lib.py    history read/write
+scripts/h3view.py   CSS and card HTML            — rendering lives in one place
+scripts/h3gen.py    CLI: generate
+scripts/h3hist.py   CLI: list / show / rate / gallery
+web/htmx.min.js     vendored, no CDN
+history/            history.jsonl, thumbs/, gallery.html
+```
+
+Server-rendered fragments swapped by htmx, so card markup exists only in
+`h3view.card_html`. Progress is a value update rather than a fragment swap, so
+it uses the browser's own `EventSource`.
+
+## License
+
+Code and documentation: [MIT](LICENSE). Bundled htmx is Zero-Clause BSD.
+The model weights are **not** distributed here and carry their own license —
+see the territorial restriction above.
