@@ -1,0 +1,17 @@
+# モデルの重み（65GB）。HuggingFace から取得するものなので追跡しない。
+# 取得方法: mlx-serve pull ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit
+models/
+
+# 生成した動画。1本あたり数MBで、生成のたびに増え続ける。
+# history.jsonl に設定とシードが残っているので、必要なら再生成できる。
+outputs/
+
+# 派生物・一時ファイル
+history/gallery.html
+*.tmpdir/
+logs/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

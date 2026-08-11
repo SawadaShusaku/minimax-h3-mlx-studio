@@ -1,0 +1,116 @@
+# minimax-h3-01
+
+MiniMax-H3（Hailuo 3.0）を Apple Silicon 上でローカル実行する環境。
+映像とステレオ音声を1パスで同時生成する。
+
+- 実行環境: Mac Studio / M4 Max / 128GB / macOS 26.6.1
+- ランタイム: [mlx-serve](https://github.com/ddalcu/mlx-serve) 26.8.4（Homebrew、Python不要）
+- モデル: [ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit](https://huggingface.co/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit)（65GB、8bit量子化）
+
+## 構成
+
+```
+minimax-h3-01/
+├── models/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit/   重み一式（65GB）
+├── scripts/serve.sh                                  mlx-serve 起動
+├── scripts/h3app.py                                  Webアプリ（生成＋履歴）
+├── scripts/h3gen.py                                  生成（CLI）
+├── scripts/h3hist.py                                 履歴の閲覧・評価・静的ギャラリー
+├── scripts/h3core.py                                 生成の実処理（共用）
+├── scripts/h3lib.py                                  履歴の読み書き（共用）
+├── scripts/h3view.py                                 CSS・カードのHTML（共用）
+├── web/htmx.min.js                                   同梱（CDN不要）
+├── outputs/                                          生成した動画
+├── history/history.jsonl                             全生成の記録（1行1件・追記のみ）
+├── history/gallery.html                              静的な一覧（再生成可能）
+└── logs/                                             ログ
+```
+
+## 使い方（Webアプリ）
+
+mlx-serve を起動してから、アプリを起動する:
+
+```bash
+./scripts/serve.sh && ./scripts/h3app.py
+```
+
+`http://127.0.0.1:8765/` が開く。左のフォームで生成し、右に履歴が並ぶ。
+
+- 生成中は経過・ステップ・**1ステップの実測から出した残り時間**が出る
+- 履歴カードの「この設定で作り直す」でフォームに設定が流し込まれる（`forked_from` に系譜が残る）
+- ★ボタンで評価。カードだけが差し替わる
+- 生成はGPUを占有するので**同時に1件のみ**。ブラウザを閉じても生成は続き、
+  開き直せば進行中のジョブに再接続する
+
+技術構成はPython標準ライブラリのHTTPサーバ＋HTMX。**ビルド工程も外部依存もない**
+（HTMXは `web/` に同梱）。画面はサーバがHTML断片を返してHTMXが差し替える方式で、
+カードの描画コードはPython側の1箇所（`h3view.card_html`）にしかない。
+進捗だけは値の更新なのでブラウザ標準の `EventSource` で受けている。
+
+## 使い方（CLI）
+
+mlx-serve を起動する:
+
+```bash
+./scripts/serve.sh
+```
+
+動画を生成する（`outputs/` に保存され、`history/history.jsonl` に自動で記録される）:
+
+```bash
+./scripts/h3gen.py --prompt "A girl on a grassy hilltop in a strong wind. overall_soundscape: gusting wind." --frames 124 --width 1024 --height 768 --steps 6 --turbo
+```
+
+過去の設定を引き継いで派生させる（変えたい項目だけ指定する）:
+
+```bash
+./scripts/h3gen.py --from 20260811-1523 --seed 42
+```
+
+停止する:
+
+```bash
+pkill -f 'mlx-serve --model'
+```
+
+## 履歴
+
+すべての生成が `history/history.jsonl` に1行1件で追記される。失敗も記録するので、
+避けるべき設定の根拠が残る。**送った値（`requested`）と実際に使われた値（`effective`）を
+両方持つ** — サーバはフレーム数を `17k+5` に丸め、`steps` を turbo の有無で変えるため、
+送った値だけでは再現できない。同じ内容が mp4 のコメント欄にも埋め込まれるので、
+動画ファイル単体でも設定が分かる。
+
+```bash
+./scripts/h3hist.py list                          # 一覧
+./scripts/h3hist.py list --search watercolor      # プロンプト本文で絞り込み
+./scripts/h3hist.py show 20260811-1523            # 1件の全項目
+./scripts/h3hist.py rate 20260811-1523 5 --notes "背景の質感が狙いどおり"
+./scripts/h3hist.py gallery --open                # 動画つき一覧をブラウザで開く
+```
+
+`gallery.html` は `history.jsonl` から毎回作り直す派生物なので、消しても失われない。
+評価とメモは追記される別レコードとして持ち、読み出し時に畳み込むため、
+付け直しても生成の記録そのものは書き換わらない。
+
+## パラメータの勘所
+
+| 項目 | 内容 |
+|---|---|
+| `--frames` | `17k+5` の階段に丸められる（5, 22, 39, 56, 73, 90, 107…）。24fps なので 39=1.6秒、56=2.3秒、107=4.5秒 |
+| `--width` / `--height` | **32の倍数**必須。外すと 400 エラー |
+| `--turbo` | 4ステップ蒸留LoRAを使う（下限4ステップ）。付けないと既定30ステップで7倍以上遅い |
+| `overall_soundscape:` | プロンプト末尾にこう書くと、以降が音声の指示になる |
+
+## 実測（M4 Max 128GB）
+
+- 960x544 / 39フレーム(1.62秒) / turbo 4ステップ → **約120〜134秒**
+- メモリ実効ピーク **約28GB**。text_encoder(25.6GB) を解放してから DiT(20GB) を載せる
+  段階ロードなので、ファイル合計65GBが同時に載ることはない
+
+## 注意
+
+- API（`POST /v1/video/generations`）が返すのは base64 の rgb8 生フレームと
+  pcm_s16le ステレオ音声で、mp4 ではない。`h3gen.py` が ffmpeg で束ねている
+- モデル本体のライセンスは MiniMax の独自ライセンス（EU等の地域制限あり）。
+  mlx-serve 自体は MIT
