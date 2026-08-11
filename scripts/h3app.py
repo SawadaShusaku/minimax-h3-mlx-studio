@@ -13,7 +13,6 @@ Python標準ライブラリのみで動く。画面はサーバがHTML断片を�
 import argparse
 import html
 import json
-import random
 import threading
 import time
 import urllib.parse
@@ -75,64 +74,6 @@ def start_job(params, port):
 
 # ---------------------------------------------------------------- HTML 断片
 
-def form_html(src=None):
-    """生成フォーム。src を渡すとその設定で埋める（「この設定で作り直す」）。"""
-    req = (src or {}).get("requested", {})
-    esc = html.escape
-    prompt = esc(req.get("prompt", ""))
-    width = req.get("width", h3core.FALLBACK["width"])
-    height = req.get("height", h3core.FALLBACK["height"])
-    frames = req.get("frames", h3core.FALLBACK["frames"])
-    steps = req.get("steps") or h3core.FALLBACK["steps"]
-    seed = req.get("seed", random.randint(1, 99999))
-    turbo = req.get("turbo", True)
-    forked = src["id"] if src else ""
-
-    res_options = "".join(
-        f'<option value="{w}x{h}"{" selected" if (w, h) == (width, height) else ""}>'
-        f"{esc(text)}</option>" for w, h, text in h3view.RESOLUTIONS)
-    frame_options = "".join(
-        f'<option value="{n}"{" selected" if n == frames else ""}>'
-        f"{n}フレーム（{n / 24:.1f}秒）</option>" for n in h3view.FRAME_LADDER)
-
-    banner = ""
-    if src:
-        banner = (f'<div class="notes">{esc(src["id"])} の設定を引き継いでいます。'
-                  f'変えたい項目だけ書き換えてください。</div>')
-
-    return f"""<form id="form" hx-post="/generate" hx-target="#progress"
-      hx-swap="innerHTML" hx-disabled-elt="#go">
-  {banner}
-  <input type="hidden" name="forked_from" value="{esc(forked)}">
-  <label>プロンプト
-    <span class="hint">末尾の overall_soundscape: 以降が音声の指示になる</span></label>
-  <textarea name="prompt" required
-    placeholder="Hand-drawn 2D cel animation ... overall_soundscape: ...">{prompt}</textarea>
-
-  <label>解像度 <span class="hint">短辺768がネイティブ</span></label>
-  <select name="resolution">{res_options}</select>
-
-  <label>長さ <span class="hint">124フレーム未満は学習範囲外</span></label>
-  <select name="frames">{frame_options}</select>
-
-  <div class="row">
-    <div>
-      <label>ステップ <span class="hint">turbo時6〜8</span></label>
-      <input type="number" name="steps" value="{steps}" min="1" max="50">
-    </div>
-    <div>
-      <label>シード <span class="hint">同じ値で再現</span></label>
-      <input type="number" name="seed" value="{seed}" min="0">
-    </div>
-  </div>
-
-  <label class="check"><input type="checkbox" name="turbo" value="1"
-    {"checked" if turbo else ""}>turbo（4ステップ蒸留LoRA を使う）</label>
-
-  <button id="go" class="primary" type="submit">生成する</button>
-</form>"""
-
-
 def progress_html(job_id):
     return f"""<div class="prog" id="prog" data-job="{job_id}">
   <div class="stage">生成を開始しました</div>
@@ -151,6 +92,42 @@ def history_html(records):
 APP_JS = """
 %(click)s
 
+// 画像はブラウザ側で base64 にして hidden へ入れる。こうするとフォームは
+// 素の urlencoded のままで済み、サーバに multipart の解析が要らない。
+document.body.addEventListener('change', e => {
+  const input = e.target;
+  if (input.type !== 'file' || !input.dataset.target) return;
+  const name = input.dataset.target;
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const b64 = reader.result.split(',')[1];
+    document.querySelector(`input[name="${name}_b64"]`).value = b64;
+    const prev = document.getElementById(name + '-prev');
+    prev.src = reader.result;
+    prev.style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+});
+
+// 窓の数と1窓の長さから合計秒数を出す／品質優先の警告を出し入れする
+function syncForm() {
+  const f = document.getElementById('frames-sel'), c = document.getElementById('chain-sel');
+  if (f && c) {
+    [...c.options].forEach(o => {
+      const n = +o.value, total = n * (+f.value) / 24;
+      o.textContent = n === 1 ? '1窓' : n + '窓（約' + Math.round(total) + '秒）';
+    });
+  }
+  const slow = document.querySelector('input[name=slow]');
+  const warn = document.getElementById('slow-warn');
+  if (slow && warn) warn.style.display = slow.checked ? 'block' : 'none';
+}
+document.body.addEventListener('change', syncForm);
+document.body.addEventListener('htmx:afterSwap', syncForm);
+syncForm();
+
 // 進捗は「HTML断片の差し替え」ではなく「値の更新」なので EventSource で受ける。
 function watch(jobId) {
   const es = new EventSource('/progress/' + jobId);
@@ -163,7 +140,7 @@ function watch(jobId) {
       es.close();
       document.getElementById('progress').innerHTML = '';
       htmx.ajax('GET', '/history', {target: '#history', swap: 'innerHTML'});
-      htmx.ajax('GET', '/form', {target: '#form', swap: 'outerHTML'});
+      htmx.ajax('GET', '/form', {target: '#composer', swap: 'outerHTML'});
       return;
     }
     if (stage) stage.textContent = d.stage || '生成中';
@@ -213,7 +190,8 @@ def page_html(records, running_job):
 <div class="sub">生成と履歴。動画のサムネイルをクリックすると再生します。</div>
 <div class="wrap">
   <div class="panel">
-    <div class="card"><h2>新しく作る</h2>{form_html()}</div>
+    <div class="card"><h2>新しく作る</h2>
+      {h3view.composer_html()}</div>
   </div>
   <div>
     <div id="progress">{prog}</div>
@@ -245,14 +223,16 @@ class Handler(BaseHTTPRequestHandler):
     def send_file(self, path: Path):
         if not path.is_file():
             return self.send("見つかりません", status=404)
-        types = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".png": "image/png",
+        types = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".png": "image/png",
                  ".js": "text/javascript; charset=utf-8"}
         self.send(path.read_bytes(), types.get(path.suffix, "application/octet-stream"))
 
     def safe_media(self, rel_path):
-        """outputs/ と history/ の中のファイルだけを返す（パス抜けを防ぐ）。"""
+        """outputs/ inputs/ history/ の中のファイルだけを返す（パス抜けを防ぐ）。"""
         target = (h3lib.PROJECT / urllib.parse.unquote(rel_path)).resolve()
-        for root in (h3lib.OUTPUT_DIR.resolve(), h3lib.HISTORY_DIR.resolve()):
+        for root in (h3lib.OUTPUT_DIR.resolve(), h3lib.INPUTS_DIR.resolve(),
+                     h3lib.HISTORY_DIR.resolve()):
             try:
                 target.relative_to(root)
             except ValueError:
@@ -260,10 +240,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_file(target)
         return self.send("見つかりません", status=404)
 
-    def form_values(self):
+    def form_values(self, multi=()):
+        """フォームの値。multi に挙げた名前だけはリストで返す（LoRAの複数行）。"""
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length).decode("utf-8")
-        return {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+        parsed = urllib.parse.parse_qs(raw, keep_blank_values=True)
+        out = {k: v[0] for k, v in parsed.items()}
+        for key in multi:
+            out[key] = parsed.get(key, [])
+        return out
 
     # -- ルーティング -----------------------------------------------
     def do_GET(self):
@@ -283,7 +268,8 @@ class Handler(BaseHTTPRequestHandler):
                     src = h3lib.find(query["from"][0])
                 except SystemExit:
                     src = None
-            return self.send(form_html(src))
+            mode = query.get("mode", [None])[0]
+            return self.send(h3view.composer_html(src, mode))
         if path == "/static/htmx.min.js":
             return self.send_file(WEB_DIR / "htmx.min.js")
         if path.startswith("/media/"):
@@ -302,9 +288,11 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- 各処理 -----------------------------------------------------
     def handle_generate(self):
-        v = self.form_values()
+        v = self.form_values(multi=("lora_path", "lora_scale"))
         try:
             width, height = (int(x) for x in v.get("resolution", "1024x768").split("x"))
+            loras = [{"path": p.strip(), "scale": float(s or 1.0)}
+                     for p, s in zip(v["lora_path"], v["lora_scale"]) if p.strip()]
             params = {
                 "prompt": v.get("prompt", "").strip(),
                 "width": width, "height": height,
@@ -312,12 +300,21 @@ class Handler(BaseHTTPRequestHandler):
                 "steps": int(v.get("steps") or h3core.FALLBACK["steps"]),
                 "seed": int(v.get("seed") or 0),
                 "turbo": v.get("turbo") == "1",
+                # チェックが入ったときだけ fast を切る（既定は高速側）。
+                "fast": v.get("slow") != "1",
+                "chain_windows": int(v.get("chain_windows") or 1),
+                "loras": loras,
                 "forked_from": v.get("forked_from") or None,
             }
+            self.attach_keyframes(params, v)
             h3core.normalize(params)
-        except (ValueError, h3core.GenerationError) as err:
+        except (ValueError, KeyError, h3core.GenerationError) as err:
             return self.send(f'<div class="prog"><div class="err">{html.escape(str(err))}'
                              f"</div></div>")
+
+        if params["mode"] != v.get("mode", "t2va"):
+            return self.send('<div class="prog"><div class="err">'
+                             "このモードに必要な画像が指定されていません</div></div>")
 
         job = start_job(params, self.server.h3_port)
         if job is None:
@@ -325,6 +322,29 @@ class Handler(BaseHTTPRequestHandler):
                              "すでに生成が走っています。終わってから実行してください。"
                              "</div></div>")
         return self.send(progress_html(id(job)))
+
+    def attach_keyframes(self, params, v):
+        """フォームの画像を params に載せる。
+
+        値は3通り: 空（なし）／実際のbase64（新規に選んだ）／"keep"（派生元の
+        画像をそのまま使う）。モードで要らない画像は捨てる。
+        """
+        wanted = {"t2va": (), "fl2va": ("first_frame",),
+                  "interp": ("first_frame", "last_frame")}[v.get("mode", "t2va")]
+        for key in ("first_frame", "last_frame"):
+            data = (v.get(key + "_b64") or "").strip()
+            if key not in wanted or not data:
+                continue
+            if data == "keep":
+                src = h3lib.find(v["forked_from"]) if v.get("forked_from") else None
+                path = (src or {}).get("inputs", {}).get(key)
+                if not path:
+                    continue
+                params[key + "_b64"], params[key + "_ext"] = \
+                    h3core.read_image_b64(h3lib.PROJECT / path)
+            else:
+                params[key + "_b64"] = data
+                params[key + "_ext"] = ".png"
 
     def handle_rate(self):
         v = self.form_values()

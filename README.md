@@ -59,10 +59,39 @@ mlx-serve pull ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit   # 65 GB
 ./scripts/h3app.py      # open the web UI at http://127.0.0.1:8765/
 ```
 
+## Modes
+
+The sidebar picks what you feed the model. This pack declares `t2va` and
+`fl2va`; reference conditioning needs the separate REF2VA checkpoint.
+
+| Mode | You supply | What happens |
+|---|---|---|
+| **Text only** (`t2va`) | prompt | Generated from the prompt alone |
+| **From an image** (`fl2va`) | prompt + 1 image | **The image becomes frame 0** and the clip moves on from it |
+| **Between two images** (`fl2va`) | prompt + 2 images | Start and end are pinned; the model fills the middle |
+
+Keyframes are stretched (first) or center-covered (last) onto the canvas and
+also enter the text conditioning as a picture block. An undecodable image is a
+named error, never a silent fall back to text-only.
+
+## Length, quality and style
+
+* **Chained windows (1–6).** Frame count is **per window**; each window is
+  conditioned on the previous window's last decoded frame. Six windows of 124
+  frames is about **31 seconds in one generation** — well past the 15 s a single
+  window allows
+* **Quality-first mode** (`fast: false`) drops the attention-broadcast cache.
+  Roughly **4× the runtime — and *lower* memory**, which is backwards from every
+  other quality toggle and worth knowing before a long clip
+* **Style LoRAs** stack with turbo (7 slots free of 8; turbo takes one), each
+  with its own scale
+
 ## The web UI
 
 Form on the left, progress and history on the right. Python **standard library
 only** plus a vendored copy of htmx — no build step, no `node_modules`, no venv.
+Uploaded images are base64-encoded in the browser, so the server never needs a
+multipart parser.
 
 * Live progress with a **remaining-time estimate derived from the measured
   seconds-per-step**, which matters when a run takes 20+ minutes
@@ -76,8 +105,13 @@ Prefer the terminal:
 
 ```bash
 ./scripts/h3gen.py --prompt "..." --frames 124 --width 1024 --height 768 --steps 6 --turbo
+./scripts/h3gen.py --prompt "..." --first-frame start.png             # image to video
+./scripts/h3gen.py --prompt "..." --first-frame a.png --last-frame b.png
+./scripts/h3gen.py --prompt "..." --frames 124 --chain-windows 6      # ~31 s
+./scripts/h3gen.py --prompt "..." --no-fast                           # quality first
+./scripts/h3gen.py --prompt "..." --lora /abs/style.safetensors:0.8
 ./scripts/h3gen.py --from 20260811-1523 --seed 42     # inherit and vary
-./scripts/h3hist.py list
+./scripts/h3hist.py list --mode fl2va
 ./scripts/h3hist.py gallery --open
 ```
 
@@ -156,8 +190,12 @@ count*. Raising resolution and frame count together multiplies — an estimate o
 * The same metadata is embedded in each mp4's comment field, so a video that
   travels alone still carries its settings (`ffprobe -show_entries format_tags=comment`)
 
-Not tracked by git: the weights (65 GB) and `outputs/` (videos grow without
-bound and git keeps every version forever). The 4-frame contact strips **are**
+Records also carry `mode` and the keyframes the run was given, and cards show
+those input images — a record that cannot say what it started from is a weak
+record.
+
+Not tracked by git: the weights (65 GB), `outputs/` (videos grow without bound
+and git keeps every version forever) and `inputs/` (same reasoning). The 4-frame contact strips **are**
 tracked — roughly 20 KB each, and the only visual record that survives a clone.
 
 ## Layout
@@ -170,6 +208,7 @@ scripts/h3view.py   CSS and card HTML            — rendering lives in one plac
 scripts/h3gen.py    CLI: generate
 scripts/h3hist.py   CLI: list / show / rate / gallery
 web/htmx.min.js     vendored, no CDN
+inputs/             keyframe images handed to the model
 history/            history.jsonl, thumbs/, gallery.html
 ```
 

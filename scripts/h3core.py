@@ -20,9 +20,12 @@ import h3lib
 
 DEFAULT_PORT = 11434
 # 引き継げる設定。--from と「この設定で作り直す」はこれらだけを継承する。
-INHERITED = ("prompt", "frames", "width", "height", "steps", "seed", "turbo")
-FALLBACK = {"frames": 124, "width": 1024, "height": 768,
-            "steps": 6, "seed": 7, "turbo": True}
+INHERITED = ("prompt", "frames", "width", "height", "steps", "seed", "turbo",
+             "fast", "chain_windows")
+FALLBACK = {"frames": 124, "width": 1024, "height": 768, "steps": 6,
+            "seed": 7, "turbo": True, "fast": True, "chain_windows": 1}
+MAX_CHAIN = 6      # サーバ側の上限
+MAX_LORAS = 7      # 実際は8枠だが turbo が1枠を使う
 
 
 class GenerationError(RuntimeError):
@@ -44,8 +47,12 @@ def snap_frames(n):
     return 5 + 17 * ((n - 5 + 16) // 17)
 
 
-def stream_generate(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
-    """SSE を読みながら complete イベントと所要時間を返す。"""
+def build_body(params):
+    """/v1/video/generations に送るJSONを組み立てる。
+
+    num_frames は「1窓あたり」の値で、chain_windows 個の窓が前の窓の最終フレームを
+    引き継いで連結される。応答が返す frames は連結後の総数になる。
+    """
     body = {
         "prompt": params["prompt"],
         "num_frames": params["frames"],
@@ -57,6 +64,29 @@ def stream_generate(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
     }
     if params.get("turbo"):
         body["turbo"] = True
+    if params.get("chain_windows", 1) > 1:
+        body["chain_windows"] = params["chain_windows"]
+    # fast は既定 true。品質優先のときだけ明示的に false を送る
+    # （このトグルは速度を捨てる代わりに品質とメモリの両方が良くなる）。
+    if params.get("fast") is False:
+        body["fast"] = False
+
+    for field, key in (("first_frame_image", "first_frame"),
+                       ("last_frame_image", "last_frame")):
+        data = params.get(key + "_b64")
+        if data:
+            body[field] = data
+
+    loras = params.get("loras") or []
+    if loras:
+        body["lora_paths"] = [str(Path(l["path"]).resolve()) for l in loras]
+        body["lora_scales"] = [float(l.get("scale", 1.0)) for l in loras]
+    return body
+
+
+def stream_generate(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
+    """SSE を読みながら complete イベントと所要時間を返す。"""
+    body = build_body(params)
 
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}/v1/video/generations",
@@ -156,8 +186,29 @@ def make_strip(video_path, frames, out_path, tiles=4, width=200, quality=6):
         return None
 
 
+def mode_of(params):
+    """入力の有無から生成モードを決める。"""
+    has_first = bool(params.get("first_frame_b64"))
+    has_last = bool(params.get("last_frame_b64"))
+    if has_first and has_last:
+        return "interp"
+    if has_first or has_last:
+        return "fl2va"
+    return "t2va"
+
+
+def read_image_b64(path):
+    """画像ファイルを base64 にする。拡張子も返す（保存時に使う）。"""
+    p = Path(path)
+    if not p.is_file():
+        raise GenerationError(f"画像が見つかりません: {path}")
+    if p.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+        raise GenerationError(f"画像は PNG か JPEG にしてください: {p.name}")
+    return base64.b64encode(p.read_bytes()).decode(), p.suffix.lower()
+
+
 def normalize(params):
-    """欠けている項目を既定値で埋め、ラベルを決める。"""
+    """欠けている項目を既定値で埋め、値の妥当性を確かめる。"""
     p = dict(params)
     for key, value in FALLBACK.items():
         if p.get(key) is None:
@@ -166,9 +217,39 @@ def normalize(params):
         raise GenerationError("プロンプトが空です")
     if p["width"] % 32 or p["height"] % 32:
         raise GenerationError("幅と高さは32の倍数にしてください")
+    if not 1 <= p["chain_windows"] <= MAX_CHAIN:
+        raise GenerationError(f"連結する窓の数は 1〜{MAX_CHAIN} にしてください")
+    if len(p.get("loras") or []) > MAX_LORAS:
+        raise GenerationError(f"LoRAは最大{MAX_LORAS}枚です（turboが1枠を使うため）")
+    for lora in p.get("loras") or []:
+        if not Path(lora["path"]).is_file():
+            raise GenerationError(f"LoRAが見つかりません: {lora['path']}")
+
+    # ファイルパスで渡された画像はここで base64 にしておく（CLI 経路）。
+    for key in ("first_frame", "last_frame"):
+        if p.get(key + "_path") and not p.get(key + "_b64"):
+            p[key + "_b64"], p[key + "_ext"] = read_image_b64(p[key + "_path"])
+    p["mode"] = mode_of(p)
     if not p.get("label"):
         p["label"] = slug(p["prompt"])
     return p
+
+
+def save_inputs(params, rec_id):
+    """渡したキーフレームを inputs/ に保存し、履歴から参照できるようにする。
+
+    何から生成したかが分からないと記録の価値が落ちるので、入力も残す。
+    """
+    saved = {}
+    for key in ("first_frame", "last_frame"):
+        data = params.get(key + "_b64")
+        if not data:
+            continue
+        ext = params.get(key + "_ext") or ".png"
+        path = h3lib.INPUTS_DIR / f"{rec_id}_{key}{ext}"
+        path.write_bytes(base64.b64decode(data))
+        saved[key] = h3lib.rel(path)
+    return saved
 
 
 def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
@@ -178,8 +259,11 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
     rec_id = h3lib.new_id()
     record = {
         "kind": "generation", "id": rec_id, "created_at": h3lib.now_iso(),
-        "status": "ok", "label": p["label"], "prompt": p["prompt"],
+        "status": "ok", "mode": p["mode"], "label": p["label"],
+        "prompt": p["prompt"],
         "requested": {k: p[k] for k in INHERITED},
+        "loras": p.get("loras") or [],
+        "inputs": save_inputs(p, rec_id),
         "forked_from": p.get("forked_from"), "rating": None, "notes": "",
     }
 

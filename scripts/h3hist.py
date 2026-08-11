@@ -26,21 +26,24 @@ def cmd_list(args):
         return
     if args.failed:
         records = [r for r in records if r["status"] != "ok"]
+    if args.mode:
+        records = [r for r in records if r.get("mode", "t2va") == args.mode]
     if args.search:
         needle = args.search.lower()
         records = [r for r in records if needle in r["prompt"].lower()]
     records = records[-args.limit:]
 
-    print(f"{'ID':<16} {'状態':<5} {'解像度':<10} {'尺':<7} {'step':<5} "
-          f"{'seed':<6} {'評価':<4} ラベル")
-    print("-" * 88)
+    print(f"{'ID':<16} {'状態':<5} {'モード':<8} {'解像度':<10} {'尺':<7} "
+          f"{'step':<5} {'seed':<6} {'評価':<4} ラベル")
+    print("-" * 100)
     for r in records:
         eff, req = r.get("effective") or {}, r["requested"]
         res = f"{eff.get('width', req['width'])}x{eff.get('height', req['height'])}"
         dur = f"{eff['duration_sec']}s" if eff.get("duration_sec") else "-"
         rating = "★" * r["rating"] if r.get("rating") else "-"
         state = "ok" if r["status"] == "ok" else "失敗"
-        print(f"{r['id']:<16} {state:<5} {res:<10} {dur:<7} "
+        mode = h3lib.MODES.get(r.get("mode", "t2va"), "?")
+        print(f"{r['id']:<16} {state:<5} {mode:<8} {res:<10} {dur:<7} "
               f"{req['steps'] or '-':<5} {req['seed']:<6} {rating:<4} {r.get('label','')}")
 
 
@@ -98,6 +101,7 @@ def main():
     pl.add_argument("--limit", type=int, default=20)
     pl.add_argument("--search", help="プロンプト本文で絞り込み")
     pl.add_argument("--failed", action="store_true", help="失敗したものだけ")
+    pl.add_argument("--mode", choices=list(h3lib.MODES), help="モードで絞り込み")
     pl.set_defaults(func=cmd_list)
 
     ps = sub.add_parser("show", help="1件の詳細")

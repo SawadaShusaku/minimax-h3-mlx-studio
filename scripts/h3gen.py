@@ -24,6 +24,16 @@ def parse_args():
     p.add_argument("--seed", type=int)
     p.add_argument("--turbo", action=argparse.BooleanOptionalAction, default=None,
                    help="蒸留LoRAを使う（--no-turbo で無効）")
+    p.add_argument("--fast", action=argparse.BooleanOptionalAction, default=None,
+                   help="--no-fast で品質優先（約4倍の時間、メモリは減る）")
+    p.add_argument("--chain-windows", dest="chain_windows", type=int,
+                   help="窓を連結して長尺にする（1〜6）。--frames は1窓あたり")
+    p.add_argument("--first-frame", dest="first_frame_path",
+                   help="1コマ目にする画像（PNG/JPEG）")
+    p.add_argument("--last-frame", dest="last_frame_path",
+                   help="最終コマにする画像。--first-frame と併用で補間になる")
+    p.add_argument("--lora", action="append", default=[], metavar="PATH[:SCALE]",
+                   help="スタイルLoRA。複数指定可（例 --lora /path/a.safetensors:0.8）")
     p.add_argument("--from", dest="from_id", metavar="ID",
                    help="過去の記録から設定を引き継ぐ（明示した項目だけ上書き）")
     p.add_argument("--label", help="出力ファイル名につける短い名前")
@@ -58,7 +68,15 @@ def show_progress(ev):
 def main():
     a = parse_args()
     params = {k: getattr(a, k) for k in h3core.INHERITED}
-    params.update(label=a.label, forked_from=a.forked_from, out=a.out)
+    loras = []
+    for spec in a.lora:
+        path, _, scale = spec.rpartition(":")
+        if not path:                       # ":" がなければ全体がパス、強度は1.0
+            path, scale = spec, "1.0"
+        loras.append({"path": path, "scale": float(scale)})
+    params.update(label=a.label, forked_from=a.forked_from, out=a.out, loras=loras,
+                  first_frame_path=a.first_frame_path,
+                  last_frame_path=a.last_frame_path)
 
     record = h3core.run(params, port=a.port, timeout=a.timeout,
                         on_progress=show_progress)
@@ -70,7 +88,9 @@ def main():
         return 1
 
     eff, rt = record["effective"], record["runtime"]
-    if eff["frames"] != record["requested"]["frames"]:
+    # 連結時は「1窓あたりの指定」と「連結後の総数」を比べても意味がないので黙る
+    if (record["requested"]["chain_windows"] == 1
+            and eff["frames"] != record["requested"]["frames"]):
         print(f"  注意: フレーム数が {record['requested']['frames']} → {eff['frames']} "
               f"に丸められました（17k+5の階段）")
     print(f"  生成完了: {rt['total_sec']}s"

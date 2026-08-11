@@ -17,14 +17,22 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT / "outputs"
+INPUTS_DIR = PROJECT / "inputs"      # 生成に渡したキーフレーム画像
 HISTORY_DIR = PROJECT / "history"
 HISTORY_FILE = HISTORY_DIR / "history.jsonl"
 THUMBS_DIR = HISTORY_DIR / "thumbs"
 GALLERY_FILE = HISTORY_DIR / "gallery.html"
 
+# 生成モード。どの入力を要求するかがモードで決まる。
+MODES = {
+    "t2va": "テキストから",
+    "fl2va": "画像から",
+    "interp": "2枚の間を補間",
+}
+
 
 def ensure_dirs():
-    for d in (OUTPUT_DIR, HISTORY_DIR, THUMBS_DIR):
+    for d in (OUTPUT_DIR, INPUTS_DIR, HISTORY_DIR, THUMBS_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
