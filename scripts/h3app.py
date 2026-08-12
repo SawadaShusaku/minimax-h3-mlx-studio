@@ -11,6 +11,7 @@ Python標準ライブラリのみで動く。画面はサーバがHTML断片を�
 """
 
 import argparse
+import base64
 import html
 import json
 import threading
@@ -109,6 +110,31 @@ document.body.addEventListener('change', e => {
     prev.style.display = 'block';
   };
   reader.readAsDataURL(file);
+});
+
+// 参照は複数ファイル・複数種類なので、hidden の JSON 配列にまとめて積む。
+document.body.addEventListener('change', e => {
+  const input = e.target;
+  if (input.type !== 'file' || !input.dataset.ref) return;
+  const hidden = document.querySelector('input[name="refs_json"]');
+  if (!hidden) return;
+  let refs = [];
+  try { refs = JSON.parse(hidden.value === 'keep' ? '[]' : hidden.value); } catch (_) {}
+  refs = refs.filter(r => r.kind !== input.dataset.ref);   // 同じ種類は選び直し
+  let pending = input.files.length;
+  [...input.files].forEach(file => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      refs.push({kind: input.dataset.ref, name: file.name,
+                 b64: reader.result.split(',')[1]});
+      if (--pending === 0) {
+        hidden.value = JSON.stringify(refs);
+        document.getElementById('ref-list').innerHTML = refs.map(r =>
+          '<span class="chip"><b>' + r.kind + '</b>' + r.name + '</span>').join('');
+      }
+    };
+    reader.readAsDataURL(file);
+  });
 });
 
 // 窓の数と1窓の長さから合計秒数を出す／品質優先の警告を出し入れする
@@ -303,10 +329,12 @@ class Handler(BaseHTTPRequestHandler):
                 # チェックが入ったときだけ fast を切る（既定は高速側）。
                 "fast": v.get("slow") != "1",
                 "chain_windows": int(v.get("chain_windows") or 1),
+                "ref_image_size": v.get("ref_image_size") or "match",
                 "loras": loras,
                 "forked_from": v.get("forked_from") or None,
             }
             self.attach_keyframes(params, v)
+            self.attach_refs(params, v)
             h3core.normalize(params)
         except (ValueError, KeyError, h3core.GenerationError) as err:
             return self.send(f'<div class="prog"><div class="err">{html.escape(str(err))}'
@@ -345,6 +373,41 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 params[key + "_b64"] = data
                 params[key + "_ext"] = ".png"
+
+    def attach_refs(self, params, v):
+        """参照ファイルを inputs/ に保存し、params に載せる。
+
+        値は空／JSON配列（新規に選んだ）／"keep"（派生元のものを使う）の3通り。
+        """
+        raw = (v.get("refs_json") or "").strip()
+        if v.get("mode") != "ref2va" or not raw or raw == "[]":
+            return
+        if raw == "keep":
+            src = h3lib.find(v["forked_from"]) if v.get("forked_from") else None
+            params["refs"] = (src or {}).get("refs") or []
+            return
+        try:
+            incoming = json.loads(raw)
+        except json.JSONDecodeError:
+            raise h3core.GenerationError("参照の受け取りに失敗しました")
+
+        h3lib.ensure_dirs()
+        stamp = h3lib.new_id()
+        saved = []
+        for i, ref in enumerate(incoming, 1):
+            kind = ref.get("kind")
+            if kind not in h3core.MAX_REF:
+                raise h3core.GenerationError(f"参照の種類が不正です: {kind}")
+            suffix = Path(ref.get("name") or "").suffix.lower() or {
+                "image": ".png", "video": ".mp4", "audio": ".wav"}[kind]
+            path = h3lib.INPUTS_DIR / f"{stamp}_ref{i:02d}{suffix}"
+            try:
+                path.write_bytes(base64.b64decode(ref["b64"]))
+            except (KeyError, ValueError):
+                raise h3core.GenerationError(f"参照 {i} を読み取れませんでした")
+            saved.append({"kind": kind, "path": h3lib.rel(path),
+                          "name": ref.get("name") or path.name})
+        params["refs"] = saved
 
     def handle_rate(self):
         v = self.form_values()

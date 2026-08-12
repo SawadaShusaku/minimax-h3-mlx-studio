@@ -11,6 +11,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -26,6 +27,13 @@ FALLBACK = {"frames": 124, "width": 1024, "height": 768, "steps": 6,
             "seed": 7, "turbo": True, "fast": True, "chain_windows": 1}
 MAX_CHAIN = 6      # サーバ側の上限
 MAX_LORAS = 7      # 実際は8枠だが turbo が1枠を使う
+
+# 参照（REF2VA）の上限。種類ごとの上限を全部満たしても合計12を超えると
+# モデルが与えられたことのない組み合わせになるので、合計も必ず見る。
+MAX_REF = {"image": 9, "video": 3, "audio": 3}
+MAX_REF_TOTAL = 12
+MIN_REF_VIDEO_FRAMES = 5   # これ未満だと条件付けに使う潜在フレームが1枚も取れない
+REF_VIDEO_FRAMES = 17      # 参照動画から抜くコマ数（VAEの1クリップ分）
 
 
 class GenerationError(RuntimeError):
@@ -45,6 +53,84 @@ def snap_frames(n):
     if n <= 5:
         return 5
     return 5 + 17 * ((n - 5 + 16) // 17)
+
+
+def ref_video_frames_b64(path, count=REF_VIDEO_FRAMES):
+    """参照動画から等間隔でコマを抜き、base64 PNG の配列にする。
+
+    APIが受け取るのはコマの配列なので、動画ファイルはこちらで展開する。
+    尺の長い素材でも「動きと画風の見本」として使える枚数に間引く。
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-count_packets", "-show_entries", "stream=nb_read_packets",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True)
+    total = int((probe.stdout or "0").strip() or 0)
+    if total < MIN_REF_VIDEO_FRAMES:
+        raise GenerationError(
+            f"参照動画が短すぎます（{total}コマ）。{MIN_REF_VIDEO_FRAMES}コマ以上必要です")
+    picks = sorted({int(total * i / count) for i in range(min(count, total))})
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        expr = "+".join(f"eq(n\\,{n})" for n in picks)
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+             "-vf", f"select='{expr}'", "-vsync", "0",
+             str(Path(tmp) / "f%03d.png")], check=True)
+        for f in sorted(Path(tmp).glob("f*.png")):
+            out.append(base64.b64encode(f.read_bytes()).decode())
+    if len(out) < MIN_REF_VIDEO_FRAMES:
+        raise GenerationError("参照動画からコマを取り出せませんでした")
+    return out
+
+
+def ref_audio_wav_b64(path):
+    """参照音声を、APIが受け取れる PCM16 の WAV にして base64 にする。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / "ref.wav"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+                        "-c:a", "pcm_s16le", str(wav)], check=True)
+        return base64.b64encode(wav.read_bytes()).decode()
+
+
+def validate_refs(refs):
+    """種類ごとの上限と、合計12という本当の上限の両方を見る。"""
+    counts = {k: 0 for k in MAX_REF}
+    for ref in refs:
+        kind = ref.get("kind")
+        if kind not in MAX_REF:
+            raise GenerationError(f"参照の種類が不正です: {kind}")
+        counts[kind] += 1
+    for kind, n in counts.items():
+        if n > MAX_REF[kind]:
+            raise GenerationError(f"参照の{kind}は最大{MAX_REF[kind]}件です（{n}件）")
+    if sum(counts.values()) > MAX_REF_TOTAL:
+        raise GenerationError(
+            f"参照は全種類あわせて最大{MAX_REF_TOTAL}件です（{sum(counts.values())}件）")
+    return counts
+
+
+def refs_to_body(refs):
+    """保存済みの参照ファイルを、API が受け取る形に変換する。"""
+    images, videos, audios = [], [], []
+    for ref in refs:
+        path = h3lib.PROJECT / ref["path"]
+        if not path.is_file():
+            raise GenerationError(f"参照ファイルが見つかりません: {ref['path']}")
+        if ref["kind"] == "image":
+            images.append(base64.b64encode(path.read_bytes()).decode())
+        elif ref["kind"] == "video":
+            videos.append({"frames": ref_video_frames_b64(path)})
+        else:
+            audios.append(ref_audio_wav_b64(path))
+    body = {}
+    if images:
+        body["ref_images"] = images
+    if videos:
+        body["ref_videos"] = videos
+    if audios:
+        body["ref_audios"] = audios
+    return body
 
 
 def build_body(params):
@@ -81,6 +167,14 @@ def build_body(params):
     if loras:
         body["lora_paths"] = [str(Path(l["path"]).resolve()) for l in loras]
         body["lora_scales"] = [float(l.get("scale", 1.0)) for l in loras]
+
+    # モードによって処理できるパックが違うので、リクエストで名指しする。
+    body["model"] = h3lib.pack_for(params.get("mode", "t2va"))
+
+    refs = params.get("refs") or []
+    if refs:
+        body.update(refs_to_body(refs))
+        body["ref_image_size"] = params.get("ref_image_size", "match")
     return body
 
 
@@ -188,6 +282,8 @@ def make_strip(video_path, frames, out_path, tiles=4, width=200, quality=6):
 
 def mode_of(params):
     """入力の有無から生成モードを決める。"""
+    if params.get("refs"):
+        return "ref2va"
     has_first = bool(params.get("first_frame_b64"))
     has_last = bool(params.get("last_frame_b64"))
     if has_first and has_last:
@@ -230,6 +326,19 @@ def normalize(params):
         if p.get(key + "_path") and not p.get(key + "_b64"):
             p[key + "_b64"], p[key + "_ext"] = read_image_b64(p[key + "_path"])
     p["mode"] = mode_of(p)
+
+    # REF2VA と FL2VA は別のDiTなので、片方の機能はもう片方では使えない。
+    # サーバも400で拒否するが、待たされる前にこちらで止める。
+    if p["mode"] == "ref2va":
+        validate_refs(p["refs"])
+        if p["chain_windows"] > 1:
+            raise GenerationError(
+                "窓の連結はFL2VAのキーフレーム条件付けに乗る仕組みなので、"
+                "参照つき（REF2VA）とは併用できません")
+        if p.get("first_frame_b64") or p.get("last_frame_b64"):
+            raise GenerationError("参照つき（REF2VA）ではキーフレーム画像を使えません")
+        if p.get("ref_image_size") not in (None, "match", "max"):
+            raise GenerationError("ref_image_size は match か max にしてください")
     if not p.get("label"):
         p["label"] = slug(p["prompt"])
     return p
@@ -263,6 +372,8 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
         "prompt": p["prompt"],
         "requested": {k: p[k] for k in INHERITED},
         "loras": p.get("loras") or [],
+        "refs": p.get("refs") or [],
+        "ref_image_size": p.get("ref_image_size") if p.get("refs") else None,
         "inputs": save_inputs(p, rec_id),
         "forked_from": p.get("forked_from"), "rating": None, "notes": "",
     }

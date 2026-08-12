@@ -69,6 +69,42 @@ The sidebar picks what you feed the model. This pack declares `t2va` and
 | **Text only** (`t2va`) | prompt | Generated from the prompt alone |
 | **From an image** (`fl2va`) | prompt + 1 image | **The image becomes frame 0** and the clip moves on from it |
 | **Between two images** (`fl2va`) | prompt + 2 images | Start and end are pinned; the model fills the middle |
+| **With references** (`ref2va`) | prompt + up to 12 reference files | The references **do not appear** in the output; the model follows them for character, style and scene continuity |
+
+**The two partitions are different checkpoints.** FL2VA and REF2VA share the text
+encoder and both VAEs byte-for-byte — only the DiT differs — but what they can do
+does not overlap:
+
+| | FL2VA | REF2VA |
+|---|---|---|
+| Text only | ✅ | ✅ |
+| Keyframes (image / interpolate) | ✅ | ❌ |
+| Chained windows | ✅ | ❌ |
+| References | ❌ | ✅ |
+
+Chaining rides FL2VA's keyframe conditioning, so it cannot run on REF2VA. Both
+packs are served by one `mlx-serve` process (`--model-dir`) and each request
+names the pack it needs, so switching modes needs no restart.
+
+Because only the DiT differs, adding REF2VA to an existing FL2VA install costs
+**35 GB, not 69** — hardlink the shared files and fetch `transformer.safetensors`:
+
+```bash
+DST=models/ddalcu/MiniMax-H3-REF2VA-MLX-Serve-8bit
+SRC=models/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit
+mkdir -p "$DST"
+for f in audio_vae text_encoder video_vae; do ln -f "$SRC/$f.safetensors" "$DST/"; done
+for f in merges.txt tokenizer.json tokenizer_config.json vocab.json; do ln -f "$SRC/$f" "$DST/"; done
+BASE=https://huggingface.co/ddalcu/MiniMax-H3-REF2VA-MLX-Serve-8bit/resolve/main
+for f in config.json NOTICE MODIFICATIONS.md README.md transformer.safetensors; do
+  curl -L -o "$DST/$f" "$BASE/$f"
+done
+```
+
+Reference limits: **9 images, 3 videos, 3 audios — and 12 across all types**, which
+the per-type caps do not express (they sum to 15). Videos need at least 5 frames.
+Reference videos are sampled to 17 frames and audio is converted to PCM16 WAV
+before sending, since the API takes frames and WAV rather than media files.
 
 Keyframes are stretched (first) or center-covered (last) onto the canvas and
 also enter the text conditioning as a picture block. An undecodable image is a
@@ -110,6 +146,7 @@ Prefer the terminal:
 ./scripts/h3gen.py --prompt "..." --frames 124 --chain-windows 6      # ~31 s
 ./scripts/h3gen.py --prompt "..." --no-fast                           # quality first
 ./scripts/h3gen.py --prompt "..." --lora /abs/style.safetensors:0.8
+./scripts/h3gen.py --prompt "..." --ref image:face.png --ref image:outfit.png
 ./scripts/h3gen.py --from 20260811-1523 --seed 42     # inherit and vary
 ./scripts/h3hist.py list --mode fl2va
 ./scripts/h3hist.py gallery --open

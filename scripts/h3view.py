@@ -7,6 +7,7 @@
 
 import html
 import random
+from collections import Counter
 from pathlib import Path
 
 import h3lib
@@ -130,6 +131,7 @@ MODE_HELP = {
     "t2va": "プロンプトだけで作る",
     "fl2va": "渡した画像が1コマ目になり、そこから動き出す",
     "interp": "始点と終点を指定し、その間を作る",
+    "ref2va": "見本を渡して似せる。動画には現れない",
 }
 
 
@@ -165,6 +167,35 @@ def image_field(name, label, existing=None):
 </div>"""
 
 
+REF_KINDS = (("image", "画像", "image/png,image/jpeg", 9),
+             ("video", "動画", "video/*", 3),
+             ("audio", "音声", "audio/*", 3))
+
+
+def ref_fields(existing):
+    """参照の入力欄。ファイルはJSが base64 にして hidden の JSON に積む。"""
+    rows = []
+    for kind, label, accept, cap in REF_KINDS:
+        rows.append(
+            f'<label>参照{label} <span class="hint">最大{cap}件</span></label>'
+            f'<div class="drop"><input type="file" accept="{accept}" multiple '
+            f'data-ref="{kind}"></div>')
+    listed = "".join(
+        f'<span class="chip"><b>{html.escape(r["kind"])}</b>'
+        f'{html.escape(Path(r["path"]).name)}</span>'
+        for r in (existing or []))
+    return f"""<div class="notes">見本は動画には現れません。人物・画風・場所の
+一貫性を保つために使います。全種類あわせて最大12件。</div>
+{"".join(rows)}
+<input type="hidden" name="refs_json" value="{'keep' if existing else '[]'}">
+<div class="chips" id="ref-list">{listed}</div>
+<label>参照画像の扱い <span class="hint">既定は match</span></label>
+<select name="ref_image_size">
+  <option value="match">match（生成解像度に合わせる）</option>
+  <option value="max">max（元の大きさを活かす）</option>
+</select>"""
+
+
 def form_html(src=None, mode=None):
     """生成フォーム。src を渡すとその設定で埋める（「この設定で作り直す」）。"""
     req = (src or {}).get("requested", {})
@@ -196,6 +227,8 @@ def form_html(src=None, mode=None):
         for n in range(1, 7))
 
     image_fields = ""
+    if mode == "ref2va":
+        image_fields = ref_fields((src or {}).get("refs"))
     if mode in ("fl2va", "interp"):
         image_fields = image_field("first_frame", "始点の画像",
                                    inputs.get("first_frame"))
@@ -212,6 +245,12 @@ def form_html(src=None, mode=None):
   <input type="number" name="lora_scale" value="{l.get('scale', 1.0)}"
          step="0.05" min="0" max="2" style="max-width:90px">
 </div>"""
+
+    # 窓の連結は FL2VA のキーフレーム条件付けに乗る仕組みなので、
+    # 参照つき（REF2VA）では選ばせない。
+    chain_block = "" if mode == "ref2va" else (
+        '<label>連結する窓 <span class="hint">前の窓の最終コマから続けて作る</span>'
+        f'</label><select name="chain_windows" id="chain-sel">{chain_options}</select>')
 
     banner = ""
     if src:
@@ -236,8 +275,7 @@ def form_html(src=None, mode=None):
   <label>1窓の長さ <span class="hint">124フレーム未満は学習範囲外</span></label>
   <select name="frames" id="frames-sel">{frame_options}</select>
 
-  <label>連結する窓 <span class="hint">前の窓の最終コマから続けて作る</span></label>
-  <select name="chain_windows" id="chain-sel">{chain_options}</select>
+  {chain_block}
 
   <div class="row">
     <div>
@@ -305,6 +343,11 @@ def card_html(r, media_prefix="../", interactive=False):
         ("生成時間", fmt_duration(rt.get("total_sec")), "重みのロードからmp4化までの合計"),
         ("1ステップ", fmt_duration(rt.get("sec_per_step")),
          "1ステップあたりの所要時間。設定を変えたときの見積もりに使う"),
+        ("参照", "・".join(f"{k}{n}" for k, n in
+                          sorted(Counter(x["kind"] for x in (r.get("refs") or [])).items()))
+         or None, "生成に渡した見本の内訳。見本自体は動画には現れない"),
+        ("参照の扱い", r.get("ref_image_size") if r.get("refs") else None,
+         "match は生成解像度に合わせる、max は元の大きさを活かす"),
         ("派生元", r.get("forked_from"), "この記録の設定を引き継いだ元の生成"),
     ]
     chip_html = "".join(
@@ -330,6 +373,11 @@ def card_html(r, media_prefix="../", interactive=False):
         f"<figcaption>{caption}</figcaption></figure>"
         for key, caption in (("first_frame", "始点"), ("last_frame", "終点"))
         for path in [(r.get("inputs") or {}).get(key)] if path)
+    # 参照画像も並べる。何を見本にしたか分からない記録は価値が落ちる。
+    shots += "".join(
+        f'<figure><img loading="lazy" src="{esc(media_prefix + ref["path"])}" alt="">'
+        f'<figcaption>見本 {esc(ref.get("name", ""))}</figcaption></figure>'
+        for ref in (r.get("refs") or []) if ref["kind"] == "image")
     shots = f'<div class="inputs">{shots}</div>' if shots else ""
 
     stars = f'<span class="star">{"★" * r["rating"]}</span>' if r.get("rating") else ""

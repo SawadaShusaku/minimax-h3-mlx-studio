@@ -32,6 +32,10 @@ def parse_args():
                    help="1コマ目にする画像（PNG/JPEG）")
     p.add_argument("--last-frame", dest="last_frame_path",
                    help="最終コマにする画像。--first-frame と併用で補間になる")
+    p.add_argument("--ref", action="append", default=[], metavar="KIND:PATH",
+                   help="参照。kind は image/video/audio（例 --ref image:a.png）")
+    p.add_argument("--ref-image-size", dest="ref_image_size",
+                   choices=("match", "max"), default="match")
     p.add_argument("--lora", action="append", default=[], metavar="PATH[:SCALE]",
                    help="スタイルLoRA。複数指定可（例 --lora /path/a.safetensors:0.8）")
     p.add_argument("--from", dest="from_id", metavar="ID",
@@ -74,7 +78,14 @@ def main():
         if not path:                       # ":" がなければ全体がパス、強度は1.0
             path, scale = spec, "1.0"
         loras.append({"path": path, "scale": float(scale)})
-    params.update(label=a.label, forked_from=a.forked_from, out=a.out, loras=loras,
+    refs = []
+    for spec in a.ref:
+        kind, _, path = spec.partition(":")
+        if kind not in ("image", "video", "audio") or not path:
+            raise SystemExit(f"--ref は kind:path の形で指定してください: {spec}")
+        refs.append({"kind": kind, "path": h3lib.rel(path), "name": Path(path).name})
+    params.update(refs=refs, ref_image_size=a.ref_image_size,
+                  label=a.label, forked_from=a.forked_from, out=a.out, loras=loras,
                   first_frame_path=a.first_frame_path,
                   last_frame_path=a.last_frame_path)
 
