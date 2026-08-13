@@ -253,6 +253,20 @@ Server-rendered fragments swapped by htmx, so card markup exists only in
 `h3view.card_html`. Progress is a value update rather than a fragment swap, so
 it uses the browser's own `EventSource`.
 
+## Tests
+
+```bash
+python3 tests/test_h3app.py
+```
+
+Runs in about a second and needs no model: a stub stands in for `mlx-serve` and
+returns the same SSE shape, so the real path — form POST, mux, thumbnail,
+history write — is exercised without weights or a GPU.
+
+The web path is covered on purpose. Reference support was first shipped having
+only ever been run from the CLI, and the mode dispatch raised `KeyError` for
+every browser request; one automated POST would have caught it.
+
 ## License
 
 Code and documentation: [MIT](LICENSE). Bundled htmx is Zero-Clause BSD.
