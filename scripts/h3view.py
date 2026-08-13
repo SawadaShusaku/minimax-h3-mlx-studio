@@ -172,7 +172,7 @@ REF_KINDS = (("image", "画像", "image/png,image/jpeg", 9),
              ("audio", "音声", "audio/*", 3))
 
 
-def ref_fields(existing):
+def ref_fields(existing, size_mode="match"):
     """参照の入力欄。ファイルはJSが base64 にして hidden の JSON に積む。"""
     rows = []
     for kind, label, accept, cap in REF_KINDS:
@@ -184,16 +184,20 @@ def ref_fields(existing):
         f'<span class="chip"><b>{html.escape(r["kind"])}</b>'
         f'{html.escape(Path(r["path"]).name)}</span>'
         for r in (existing or []))
+    # 派生元が max で作られていたら選択状態で出す。既定に戻ってしまうと、
+    # 引き継いだつもりの設定が黙って変わる。
+    size_options = "".join(
+        f'<option value="{value}"{" selected" if value == size_mode else ""}>'
+        f"{label}</option>"
+        for value, label in (("match", "match（生成解像度に合わせる）"),
+                             ("max", "max（元の大きさを活かす）")))
     return f"""<div class="notes">見本は動画には現れません。人物・画風・場所の
 一貫性を保つために使います。全種類あわせて最大12件。</div>
 {"".join(rows)}
 <input type="hidden" name="refs_json" value="{'keep' if existing else '[]'}">
 <div class="chips" id="ref-list">{listed}</div>
 <label>参照画像の扱い <span class="hint">既定は match</span></label>
-<select name="ref_image_size">
-  <option value="match">match（生成解像度に合わせる）</option>
-  <option value="max">max（元の大きさを活かす）</option>
-</select>"""
+<select name="ref_image_size">{size_options}</select>"""
 
 
 def form_html(src=None, mode=None):
@@ -228,7 +232,8 @@ def form_html(src=None, mode=None):
 
     image_fields = ""
     if mode == "ref2va":
-        image_fields = ref_fields((src or {}).get("refs"))
+        image_fields = ref_fields((src or {}).get("refs"),
+                                  (src or {}).get("ref_image_size") or "match")
     if mode in ("fl2va", "interp"):
         image_fields = image_field("first_frame", "始点の画像",
                                    inputs.get("first_frame"))

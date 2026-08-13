@@ -69,14 +69,20 @@ def ref_video_frames_b64(path, count=REF_VIDEO_FRAMES):
     if total < MIN_REF_VIDEO_FRAMES:
         raise GenerationError(
             f"参照動画が短すぎます（{total}コマ）。{MIN_REF_VIDEO_FRAMES}コマ以上必要です")
-    picks = sorted({int(total * i / count) for i in range(min(count, total))})
+    # 指摘3: 抜く枚数が総コマ数より多いときは、総コマ数を除数にする。
+    # 17で割ったままだと5コマの動画が2枚しか取れず、下限割れで弾かれる。
+    n = min(count, total)
+    picks = sorted({int(total * i / n) for i in range(n)})
     out = []
     with tempfile.TemporaryDirectory() as tmp:
-        expr = "+".join(f"eq(n\\,{n})" for n in picks)
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-             "-vf", f"select='{expr}'", "-vsync", "0",
-             str(Path(tmp) / "f%03d.png")], check=True)
+        expr = "+".join(f"eq(n\\,{k})" for k in picks)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+                 "-vf", f"select='{expr}'", "-vsync", "0",
+                 str(Path(tmp) / "f%03d.png")], check=True)
+        except subprocess.CalledProcessError as err:
+            raise GenerationError(f"参照動画を読めませんでした: {path.name}") from err
         for f in sorted(Path(tmp).glob("f*.png")):
             out.append(base64.b64encode(f.read_bytes()).decode())
     if len(out) < MIN_REF_VIDEO_FRAMES:
@@ -88,8 +94,11 @@ def ref_audio_wav_b64(path):
     """参照音声を、APIが受け取れる PCM16 の WAV にして base64 にする。"""
     with tempfile.TemporaryDirectory() as tmp:
         wav = Path(tmp) / "ref.wav"
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
-                        "-c:a", "pcm_s16le", str(wav)], check=True)
+        try:
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+                            "-c:a", "pcm_s16le", str(wav)], check=True)
+        except subprocess.CalledProcessError as err:
+            raise GenerationError(f"参照音声を読めませんでした: {Path(path).name}") from err
         return base64.b64encode(wav.read_bytes()).decode()
 
 
@@ -381,7 +390,7 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
     try:
         ev, runtime = stream_generate(p, port=port, timeout=timeout,
                                       on_progress=on_progress)
-    except (GenerationError, OSError) as err:
+    except (GenerationError, OSError, subprocess.CalledProcessError) as err:
         record["status"] = "error"
         record["error"] = str(err)
         h3lib.append(record)

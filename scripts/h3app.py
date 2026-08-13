@@ -66,7 +66,17 @@ def start_job(params, port):
         CURRENT = job
 
     def worker():
-        record = h3core.run(params, port=port, on_progress=job.push)
+        # 何が飛んできても必ず finish する。ここを抜けるとジョブが永久に
+        # 「実行中」のまま残り、以降の生成が全部拒否される。
+        try:
+            record = h3core.run(params, port=port, on_progress=job.push)
+        except BaseException as err:                     # noqa: BLE001
+            record = {"kind": "generation", "id": h3lib.new_id(),
+                      "created_at": h3lib.now_iso(), "status": "error",
+                      "mode": params.get("mode", "t2va"), "label": "failed",
+                      "prompt": params.get("prompt", ""), "requested": {},
+                      "error": f"想定外の失敗: {err}"}
+            h3lib.append(record)
         job.finish(record)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -335,7 +345,9 @@ class Handler(BaseHTTPRequestHandler):
             }
             self.attach_keyframes(params, v)
             self.attach_refs(params, v)
-            h3core.normalize(params)
+            # normalize は新しい辞書を返すので、受け取らないと mode も既定値も
+            # 反映されない（この取りこぼしで mode 参照が KeyError になっていた）。
+            params = h3core.normalize(params)
         except (ValueError, KeyError, h3core.GenerationError) as err:
             return self.send(f'<div class="prog"><div class="err">{html.escape(str(err))}'
                              f"</div></div>")
@@ -357,8 +369,12 @@ class Handler(BaseHTTPRequestHandler):
         値は3通り: 空（なし）／実際のbase64（新規に選んだ）／"keep"（派生元の
         画像をそのまま使う）。モードで要らない画像は捨てる。
         """
-        wanted = {"t2va": (), "fl2va": ("first_frame",),
-                  "interp": ("first_frame", "last_frame")}[v.get("mode", "t2va")]
+        # 参照つきはキーフレームを取らない。ここに載せ忘れると Web の
+        # REF2VA が KeyError で必ず失敗するので、モードは全部書く。
+        wanted = {"t2va": (), "ref2va": (), "fl2va": ("first_frame",),
+                  "interp": ("first_frame", "last_frame")}.get(v.get("mode", "t2va"))
+        if wanted is None:
+            raise h3core.GenerationError(f"モードが不正です: {v.get('mode')}")
         for key in ("first_frame", "last_frame"):
             data = (v.get(key + "_b64") or "").strip()
             if key not in wanted or not data:
