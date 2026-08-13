@@ -4,7 +4,10 @@
 set -euo pipefail
 
 PROJECT="$(cd "$(dirname "$0")/.." && pwd)"
-MODEL="$PROJECT/models/ddalcu/MiniMax-H3-FL2VA-MLX-Serve-8bit"
+# FL2VA と REF2VA を両方見せ、リクエストの "model" で選ばせる。
+# 片方しか無くても起動でき、無いパックを要求したときだけエラーになる。
+MODEL_DIR="$PROJECT/models/ddalcu"
+MODEL="$MODEL_DIR/MiniMax-H3-FL2VA-MLX-Serve-8bit"
 PORT="${PORT:-11434}"
 LOG="$PROJECT/logs/server.log"
 
@@ -16,7 +19,7 @@ if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
   exit 0
 fi
 
-nohup mlx-serve --model "$MODEL" --serve --host 127.0.0.1 --port "$PORT" >"$LOG" 2>&1 &
+nohup mlx-serve --model-dir "$MODEL_DIR" --serve --host 127.0.0.1 --port "$PORT" >"$LOG" 2>&1 &
 echo "起動中 (pid $!) — log: $LOG"
 
 for _ in $(seq 1 120); do

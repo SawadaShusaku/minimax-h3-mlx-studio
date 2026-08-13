@@ -28,7 +28,22 @@ MODES = {
     "t2va": "テキストから",
     "fl2va": "画像から",
     "interp": "2枚の間を補間",
+    "ref2va": "参照つき",
 }
+
+# モードごとに使うパック。FL2VA と REF2VA は DiT の重みだけが違う別物で、
+# 参照を扱えるのは REF2VA、キーフレームと窓の連結を扱えるのは FL2VA だけ。
+# 1つのサーバに --model-dir で両方を置き、リクエストの "model" で選び分ける。
+PACKS = {
+    "fl2va": "MiniMax-H3-FL2VA-MLX-Serve-8bit",
+    "ref2va": "MiniMax-H3-REF2VA-MLX-Serve-8bit",
+}
+MODE_PACK = {"t2va": "fl2va", "fl2va": "fl2va", "interp": "fl2va", "ref2va": "ref2va"}
+
+
+def pack_for(mode):
+    """そのモードを実際に処理できるパックのモデルidを返す。"""
+    return PACKS[MODE_PACK.get(mode, "fl2va")]
 
 
 def ensure_dirs():

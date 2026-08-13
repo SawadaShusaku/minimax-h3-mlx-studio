@@ -11,6 +11,7 @@ Python標準ライブラリのみで動く。画面はサーバがHTML断片を�
 """
 
 import argparse
+import base64
 import html
 import json
 import threading
@@ -65,7 +66,17 @@ def start_job(params, port):
         CURRENT = job
 
     def worker():
-        record = h3core.run(params, port=port, on_progress=job.push)
+        # 何が飛んできても必ず finish する。ここを抜けるとジョブが永久に
+        # 「実行中」のまま残り、以降の生成が全部拒否される。
+        try:
+            record = h3core.run(params, port=port, on_progress=job.push)
+        except BaseException as err:                     # noqa: BLE001
+            record = {"kind": "generation", "id": h3lib.new_id(),
+                      "created_at": h3lib.now_iso(), "status": "error",
+                      "mode": params.get("mode", "t2va"), "label": "failed",
+                      "prompt": params.get("prompt", ""), "requested": {},
+                      "error": f"想定外の失敗: {err}"}
+            h3lib.append(record)
         job.finish(record)
 
     threading.Thread(target=worker, daemon=True).start()
@@ -109,6 +120,31 @@ document.body.addEventListener('change', e => {
     prev.style.display = 'block';
   };
   reader.readAsDataURL(file);
+});
+
+// 参照は複数ファイル・複数種類なので、hidden の JSON 配列にまとめて積む。
+document.body.addEventListener('change', e => {
+  const input = e.target;
+  if (input.type !== 'file' || !input.dataset.ref) return;
+  const hidden = document.querySelector('input[name="refs_json"]');
+  if (!hidden) return;
+  let refs = [];
+  try { refs = JSON.parse(hidden.value === 'keep' ? '[]' : hidden.value); } catch (_) {}
+  refs = refs.filter(r => r.kind !== input.dataset.ref);   // 同じ種類は選び直し
+  let pending = input.files.length;
+  [...input.files].forEach(file => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      refs.push({kind: input.dataset.ref, name: file.name,
+                 b64: reader.result.split(',')[1]});
+      if (--pending === 0) {
+        hidden.value = JSON.stringify(refs);
+        document.getElementById('ref-list').innerHTML = refs.map(r =>
+          '<span class="chip"><b>' + r.kind + '</b>' + r.name + '</span>').join('');
+      }
+    };
+    reader.readAsDataURL(file);
+  });
 });
 
 // 窓の数と1窓の長さから合計秒数を出す／品質優先の警告を出し入れする
@@ -303,11 +339,15 @@ class Handler(BaseHTTPRequestHandler):
                 # チェックが入ったときだけ fast を切る（既定は高速側）。
                 "fast": v.get("slow") != "1",
                 "chain_windows": int(v.get("chain_windows") or 1),
+                "ref_image_size": v.get("ref_image_size") or "match",
                 "loras": loras,
                 "forked_from": v.get("forked_from") or None,
             }
             self.attach_keyframes(params, v)
-            h3core.normalize(params)
+            self.attach_refs(params, v)
+            # normalize は新しい辞書を返すので、受け取らないと mode も既定値も
+            # 反映されない（この取りこぼしで mode 参照が KeyError になっていた）。
+            params = h3core.normalize(params)
         except (ValueError, KeyError, h3core.GenerationError) as err:
             return self.send(f'<div class="prog"><div class="err">{html.escape(str(err))}'
                              f"</div></div>")
@@ -329,8 +369,12 @@ class Handler(BaseHTTPRequestHandler):
         値は3通り: 空（なし）／実際のbase64（新規に選んだ）／"keep"（派生元の
         画像をそのまま使う）。モードで要らない画像は捨てる。
         """
-        wanted = {"t2va": (), "fl2va": ("first_frame",),
-                  "interp": ("first_frame", "last_frame")}[v.get("mode", "t2va")]
+        # 参照つきはキーフレームを取らない。ここに載せ忘れると Web の
+        # REF2VA が KeyError で必ず失敗するので、モードは全部書く。
+        wanted = {"t2va": (), "ref2va": (), "fl2va": ("first_frame",),
+                  "interp": ("first_frame", "last_frame")}.get(v.get("mode", "t2va"))
+        if wanted is None:
+            raise h3core.GenerationError(f"モードが不正です: {v.get('mode')}")
         for key in ("first_frame", "last_frame"):
             data = (v.get(key + "_b64") or "").strip()
             if key not in wanted or not data:
@@ -345,6 +389,41 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 params[key + "_b64"] = data
                 params[key + "_ext"] = ".png"
+
+    def attach_refs(self, params, v):
+        """参照ファイルを inputs/ に保存し、params に載せる。
+
+        値は空／JSON配列（新規に選んだ）／"keep"（派生元のものを使う）の3通り。
+        """
+        raw = (v.get("refs_json") or "").strip()
+        if v.get("mode") != "ref2va" or not raw or raw == "[]":
+            return
+        if raw == "keep":
+            src = h3lib.find(v["forked_from"]) if v.get("forked_from") else None
+            params["refs"] = (src or {}).get("refs") or []
+            return
+        try:
+            incoming = json.loads(raw)
+        except json.JSONDecodeError:
+            raise h3core.GenerationError("参照の受け取りに失敗しました")
+
+        h3lib.ensure_dirs()
+        stamp = h3lib.new_id()
+        saved = []
+        for i, ref in enumerate(incoming, 1):
+            kind = ref.get("kind")
+            if kind not in h3core.MAX_REF:
+                raise h3core.GenerationError(f"参照の種類が不正です: {kind}")
+            suffix = Path(ref.get("name") or "").suffix.lower() or {
+                "image": ".png", "video": ".mp4", "audio": ".wav"}[kind]
+            path = h3lib.INPUTS_DIR / f"{stamp}_ref{i:02d}{suffix}"
+            try:
+                path.write_bytes(base64.b64decode(ref["b64"]))
+            except (KeyError, ValueError):
+                raise h3core.GenerationError(f"参照 {i} を読み取れませんでした")
+            saved.append({"kind": kind, "path": h3lib.rel(path),
+                          "name": ref.get("name") or path.name})
+        params["refs"] = saved
 
     def handle_rate(self):
         v = self.form_values()
