@@ -77,13 +77,14 @@ class WebPathTests(unittest.TestCase):
         # 本番の history/ outputs/ を汚さないよう、書き込み先を差し替える。
         cls.saved = {k: getattr(h3lib, k) for k in
                      ("MODELS_DIR", "OUTPUT_DIR", "INPUTS_DIR", "HISTORY_DIR",
-                      "HISTORY_FILE", "THUMBS_DIR")}
+                      "HISTORY_FILE", "THUMBS_DIR", "RAW_FRAMES_DIR")}
         h3lib.MODELS_DIR = root / "models"
         h3lib.OUTPUT_DIR = root / "outputs"
         h3lib.INPUTS_DIR = root / "inputs"
         h3lib.HISTORY_DIR = root / "history"
         h3lib.HISTORY_FILE = root / "history" / "history.jsonl"
         h3lib.THUMBS_DIR = root / "history" / "thumbs"
+        h3lib.RAW_FRAMES_DIR = root / "history" / "raw"
         turbo_dir = h3lib.MODELS_DIR / h3lib.pack_for("t2va")
         turbo_dir.mkdir(parents=True)
         (turbo_dir / "turbo_lora.safetensors").write_bytes(b"test turbo v4")
@@ -153,6 +154,9 @@ class WebPathTests(unittest.TestCase):
                          hashlib.sha256(b"test turbo v4").hexdigest())
         self.assertIn(record["turbo_lora"]["sha256"],
                       h3lib.HISTORY_FILE.read_text("utf-8"))
+        self.assertEqual([x["frame"] for x in record["raw_frames"]], [0, 2, 4])
+        self.assertTrue(all(Path(x["path"]).is_file()
+                            for x in record["raw_frames"]))
 
     def test_reference_mode_reaches_the_server(self):
         """参照モードが 500 でも err でもなく、参照つきで実行されること。

@@ -296,8 +296,28 @@ def _per_step(marks):
     return round((marks[-1] - marks[0]) / (len(marks) - 1), 1)
 
 
-def mux(ev, out_path, metadata):
-    """rgb8 フレーム + pcm_s16le を mp4 に束ね、設定を mp4 のコメントにも埋める。"""
+def save_raw_samples(vraw, frames, width, height, rec_id):
+    """MP4圧縮前の開始・中間・終了フレームを可逆PNGで保存する。"""
+    picks = sorted({0, frames // 2, frames - 1})
+    expr = "+".join(f"eq(n\\,{n})" for n in picks)
+    pattern = h3lib.RAW_FRAMES_DIR / f"{rec_id}_%02d.png"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error",
+         "-f", "rawvideo", "-pixel_format", "rgb24",
+         "-video_size", f"{width}x{height}", "-i", str(vraw),
+         "-vf", f"select='{expr}'", "-vsync", "0", str(pattern)],
+        check=True,
+    )
+    paths = sorted(h3lib.RAW_FRAMES_DIR.glob(f"{rec_id}_*.png"))
+    if len(paths) != len(picks):
+        raise GenerationError(
+            f"圧縮前フレームの保存数が不一致: {len(paths)} != {len(picks)}")
+    return [{"frame": frame, "path": h3lib.rel(path)}
+            for frame, path in zip(picks, paths)]
+
+
+def mux(ev, out_path, metadata, rec_id=None):
+    """rgb8フレームをMP4に束ね、圧縮前サンプルと設定も残す。"""
     frames, w, h = ev["frames"], ev["width"], ev["height"]
     fps = ev.get("fps", 24)
     video_raw = base64.b64decode(ev["data"])
@@ -310,6 +330,7 @@ def mux(ev, out_path, metadata):
     try:
         vraw = tmp / "frames.rgb"
         vraw.write_bytes(video_raw)
+        raw_samples = save_raw_samples(vraw, frames, w, h, rec_id) if rec_id else []
         cmd = ["ffmpeg", "-y", "-loglevel", "error",
                "-f", "rawvideo", "-pixel_format", "rgb24",
                "-video_size", f"{w}x{h}", "-framerate", str(fps), "-i", str(vraw)]
@@ -322,6 +343,7 @@ def mux(ev, out_path, metadata):
         cmd += ["-metadata", "comment=" + json.dumps(metadata, ensure_ascii=False),
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", str(out_path)]
         subprocess.run(cmd, check=True)
+        return raw_samples
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -468,7 +490,7 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
         meta = {"id": rec_id, "prompt": p["prompt"],
                 "requested": record["requested"], "effective": record["effective"],
                 "turbo_lora": record["turbo_lora"], "loras": record["loras"]}
-        mux(ev, out_path, meta)
+        record["raw_frames"] = mux(ev, out_path, meta, rec_id=rec_id)
     except (GenerationError, subprocess.CalledProcessError) as err:
         record["status"] = "error"
         record["error"] = f"mp4化に失敗: {err}"

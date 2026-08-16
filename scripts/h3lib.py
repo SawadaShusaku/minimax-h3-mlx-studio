@@ -22,6 +22,7 @@ INPUTS_DIR = PROJECT / "inputs"      # 生成に渡したキーフレーム画�
 HISTORY_DIR = PROJECT / "history"
 HISTORY_FILE = HISTORY_DIR / "history.jsonl"
 THUMBS_DIR = HISTORY_DIR / "thumbs"
+RAW_FRAMES_DIR = HISTORY_DIR / "raw"
 GALLERY_FILE = HISTORY_DIR / "gallery.html"
 
 # 生成モード。どの入力を要求するかがモードで決まる。
@@ -48,7 +49,7 @@ def pack_for(mode):
 
 
 def ensure_dirs():
-    for d in (OUTPUT_DIR, INPUTS_DIR, HISTORY_DIR, THUMBS_DIR):
+    for d in (OUTPUT_DIR, INPUTS_DIR, HISTORY_DIR, THUMBS_DIR, RAW_FRAMES_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 

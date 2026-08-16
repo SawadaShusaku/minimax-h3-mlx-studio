@@ -8,6 +8,7 @@ outputs/
 
 # 派生物・一時ファイル
 history/gallery.html
+history/raw/
 *.tmpdir/
 logs/
 __pycache__/

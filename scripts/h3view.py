@@ -393,6 +393,10 @@ def card_html(r, media_prefix="../", interactive=False):
         f"<figcaption>{caption}</figcaption></figure>"
         for key, caption in (("first_frame", "始点"), ("last_frame", "終点"))
         for path in [(r.get("inputs") or {}).get(key)] if path)
+    shots += "".join(
+        f'<figure><img loading="lazy" src="{esc(media_prefix + sample["path"])}" alt="">'
+        f'<figcaption>圧縮前 f{sample["frame"]}</figcaption></figure>'
+        for sample in (r.get("raw_frames") or []))
     # 参照画像も並べる。何を見本にしたか分からない記録は価値が落ちる。
     shots += "".join(
         f'<figure><img loading="lazy" src="{esc(media_prefix + ref["path"])}" alt="">'
