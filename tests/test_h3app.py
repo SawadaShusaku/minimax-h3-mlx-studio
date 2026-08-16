@@ -10,6 +10,7 @@ mlx-serve は立てない。代わりに /v1/video/generations だけを模し�
 """
 
 import base64
+import hashlib
 import json
 import sys
 import tempfile
@@ -75,13 +76,17 @@ class WebPathTests(unittest.TestCase):
         root = Path(cls.tmp.name)
         # 本番の history/ outputs/ を汚さないよう、書き込み先を差し替える。
         cls.saved = {k: getattr(h3lib, k) for k in
-                     ("OUTPUT_DIR", "INPUTS_DIR", "HISTORY_DIR",
+                     ("MODELS_DIR", "OUTPUT_DIR", "INPUTS_DIR", "HISTORY_DIR",
                       "HISTORY_FILE", "THUMBS_DIR")}
+        h3lib.MODELS_DIR = root / "models"
         h3lib.OUTPUT_DIR = root / "outputs"
         h3lib.INPUTS_DIR = root / "inputs"
         h3lib.HISTORY_DIR = root / "history"
         h3lib.HISTORY_FILE = root / "history" / "history.jsonl"
         h3lib.THUMBS_DIR = root / "history" / "thumbs"
+        turbo_dir = h3lib.MODELS_DIR / h3lib.pack_for("t2va")
+        turbo_dir.mkdir(parents=True)
+        (turbo_dir / "turbo_lora.safetensors").write_bytes(b"test turbo v4")
         h3lib.ensure_dirs()
 
         cls.stub = serve(StubMlxServe)
@@ -134,13 +139,20 @@ class WebPathTests(unittest.TestCase):
     def test_text_mode_generates_and_records(self):
         status, body = self.post({
             "mode": "t2va", "prompt": "x. overall_soundscape: hum.",
-            "resolution": f"{SIZE}x{SIZE}", "frames": FRAMES, "steps": 1, "seed": 1})
+            "resolution": f"{SIZE}x{SIZE}", "frames": FRAMES, "steps": 1, "seed": 1,
+            "turbo": "1"})
         self.assertEqual(status, 200)
         self.assertIn('class="prog"', body)
         self.assertNotIn('class="err"', body)
         record = self.wait_for_record()
         self.assertEqual(record["status"], "ok")
         self.assertEqual(record["mode"], "t2va")
+        self.assertEqual(record["turbo_lora"]["filename"],
+                         "turbo_lora.safetensors")
+        self.assertEqual(record["turbo_lora"]["sha256"],
+                         hashlib.sha256(b"test turbo v4").hexdigest())
+        self.assertIn(record["turbo_lora"]["sha256"],
+                      h3lib.HISTORY_FILE.read_text("utf-8"))
 
     def test_reference_mode_reaches_the_server(self):
         """参照モードが 500 でも err でもなく、参照つきで実行されること。
@@ -163,6 +175,7 @@ class WebPathTests(unittest.TestCase):
         self.assertEqual(sent["model"], h3lib.pack_for("ref2va"))
         self.assertEqual(len(sent["ref_images"]), 1)
         self.assertEqual(sent["ref_image_size"], "max")
+        self.assertNotIn("turbo", sent)
 
     def test_keyframe_mode_sends_the_image_and_picks_fl2va(self):
         status, body = self.post({
@@ -231,6 +244,33 @@ class ReferenceHandlingTests(unittest.TestCase):
         src = {"id": "x", "mode": "ref2va", "ref_image_size": "max", "refs": [],
                "requested": dict(h3core.FALLBACK, prompt="p")}
         self.assertIn('value="max" selected', h3view.form_html(src, "ref2va"))
+
+    def test_reference_defaults_use_base_not_fl2va_turbo(self):
+        p = h3core.normalize({
+            "prompt": "p",
+            "refs": [{"kind": "image", "path": "a.png"}],
+        })
+        self.assertEqual(p["mode"], "ref2va")
+        self.assertEqual(p["steps"], 30)
+        self.assertFalse(p["turbo"])
+
+        form = h3view.form_html(None, "ref2va")
+        self.assertIn('name="steps" value="30"', form)
+        self.assertNotIn('name="turbo" value="1"\n    checked', form)
+
+    def test_fl2va_defaults_keep_the_existing_turbo_recipe(self):
+        p = h3core.normalize({"prompt": "p"})
+        self.assertEqual(p["mode"], "t2va")
+        self.assertEqual(p["steps"], 6)
+        self.assertTrue(p["turbo"])
+
+    def test_cli_keyframe_path_selects_fl2va_before_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "a.png"
+            path.write_bytes(b"read_image_b64 only records the supplied bytes")
+            p = h3core.normalize({"prompt": "p", "first_frame_path": str(path)})
+        self.assertEqual(p["mode"], "fl2va")
+        self.assertTrue(p["turbo"])
 
     def test_reference_mode_refuses_chaining_and_keyframes(self):
         base = dict(h3core.FALLBACK, prompt="p",

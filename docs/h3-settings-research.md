@@ -63,6 +63,23 @@ LoRA、steps、video shift、audio shiftは一組で合わせる必要がある�
 
 この範囲は保証値ではない。画の種類と運動量に応じて選ぶための範囲であり、全生成を高stepsへ固定する根拠にはしない。
 
+## 公式設定の実運用確認
+
+設定と公開出力の両方を確認できる例に限ると、BaseとTurboでは結論が異なる。
+
+- Base Ref2VAの20 steps、`res_multistep/simple`、960x544、24fpsで、23テイクから2分の会話シーンを組んだ制作例がある。作者はクロップした寄りで画素感が出ることと、テイク間の声の不一致を明記しているが、通常画角の映像・音声を編集素材として使えている。公式ComfyUIのBase 20 stepsが実用上の出発点であることは確認できるが、20で全ショットが高精細になるという意味ではない。
+- 公式Ref2VAワークフローと公式プロンプトガイドを使い、参照動画の背景・カメラ運動を保ったまま人物を別被写体へ置換した公開例がある。これはモデル分離とRefの役割指定が正しいことを裏づける。一方、投稿には全数値設定がないため、stepsの根拠には使わない。
+- ModelTC公式Ref2VA Turboワークフローを使った公開例では、専用LoRA、Euler/Simple、960x544、`match`相当の参照構成で会話と人物の継続を生成できている。ただし作者は公式推奨4ではなく8 stepsへ変更している。この例は専用LoRAの動作を確認できるが、4-stepの画質をそのまま証明しない。
+- 4-step Ref2VA Turboの利用報告は、正常に動く例と、背景・手・顔・音声のartifactや「mess」になる例が混在する。ModelTC自身もRef2VA/FL2VA Turboの画質と一貫性改善をroadmapに残している。したがって公式のLoRA・shift・NFE・`match`は互換性上の正しい一組だが、Ref2VAの高品質な既定値として確立したとは判断しない。
+
+以上から、このプロジェクトではRef2VAをBase既定（MLX Serve既定の30 steps）に戻す。専用Turboを導入する場合は公式の一組を崩さず明示的に選び、8 steps等の変更は「公式値」ではなく利用者側の調整として履歴へ残す。
+
+- [Base 20 stepsで会話シーンを制作した例](https://www.reddit.com/r/StableDiffusion/comments/1vj3wlk/i_treated_minimax_h3_like_a_dumb_cameraman_shot/)
+- [公式Refガイドとdefault workflowを使ったV2V例](https://www.reddit.com/r/StableDiffusion/comments/1vonhld/testing_v2v_on_minimax_h3/)
+- [ModelTC公式Ref2VA Turbo workflowを8 stepsで運用した例](https://www.reddit.com/r/StableDiffusion/comments/1vnk0c7/test_minimax_h3_ref2va_with_lightx2vs_turbo_lora/)
+- [Baseと高速化手法の同条件画質比較](https://www.reddit.com/r/StableDiffusion/comments/1vng189/minimax_h3_quality_loss_test/)
+- [Ref2VA Turbo 4-stepの設定混同と出力報告](https://www.reddit.com/r/StableDiffusion/comments/1vk8xlt/turbo_4_step_ref2va_working_minimax_h3/)
+
 ## 解像度、Ref、速度機能
 
 低解像度は構図やプロンプトの粗い確認には使えるが、同じseedでも最終解像度と内容が一致するとは限らない。最終的な肌、衣服、商品、遠景の顔、文字を判定するなら、短辺768の対象アスペクト比で確認する。通常のアップスケールは、Base生成時に欠けた細部を確実には復元しない。公式の2Kは単純アップスケールではなく、元コンテキストと768p結果を使う別の再生成工程で、現在オープンソース提供されていない。

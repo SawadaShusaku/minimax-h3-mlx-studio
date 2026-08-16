@@ -10,6 +10,7 @@ import random
 from collections import Counter
 from pathlib import Path
 
+import h3core
 import h3lib
 
 # 解像度は mlx-serve が持つ一覧に合わせる。短辺768がモデルのネイティブ。
@@ -212,10 +213,11 @@ def form_html(src=None, mode=None):
     width = req.get("width", 1024)
     height = req.get("height", 768)
     frames = req.get("frames", 124)
-    steps = req.get("steps") or 6
+    defaults = h3core.defaults_for(mode)
+    steps = req.get("steps") or defaults["steps"]
     seed = req.get("seed", random.randint(1, 99999))
-    turbo = req.get("turbo", True)
-    fast = req.get("fast", True)
+    turbo = req.get("turbo", defaults["turbo"])
+    fast = req.get("fast", defaults["fast"])
     chain = req.get("chain_windows", 1)
     loras = (src or {}).get("loras", [])
 
@@ -284,7 +286,7 @@ def form_html(src=None, mode=None):
 
   <div class="row">
     <div>
-      <label>ステップ <span class="hint">turbo時6〜8</span></label>
+      <label>ステップ <span class="hint">{"Base既定30" if mode == "ref2va" else "turbo時6〜8"}</span></label>
       <input type="number" name="steps" value="{steps}" min="1" max="50">
     </div>
     <div>
@@ -294,7 +296,7 @@ def form_html(src=None, mode=None):
   </div>
 
   <label class="check"><input type="checkbox" name="turbo" value="1"
-    {"checked" if turbo else ""}>turbo（4ステップ蒸留LoRA を使う）</label>
+    {"checked" if turbo else ""}>turbo（{"Ref2VA対応LoRAを導入した場合のみ" if mode == "ref2va" else "4ステップ蒸留LoRAを使う"}）</label>
   <label class="check"><input type="checkbox" name="slow" value="1"
     {"" if fast else "checked"}>品質優先（アテンション再利用をやめる）</label>
   <div class="warn" id="slow-warn" style="display:none">
@@ -325,6 +327,16 @@ def card_html(r, media_prefix="../", interactive=False):
     # (ラベル, 値, 補足) — ラベルが単位の意味を示すので、値に述語を付けない。
     chain = req.get("chain_windows", 1)
     loras = r.get("loras") or []
+    turbo_lora = r.get("turbo_lora") or {}
+    turbo_name = turbo_lora.get("filename")
+    turbo_hash = turbo_lora.get("sha256")
+    if req.get("turbo") and turbo_lora.get("status") == "missing":
+        turbo_value = "見つからない"
+    elif turbo_name:
+        turbo_value = turbo_name + (f" [{turbo_hash[:12]}]" if turbo_hash else "")
+    else:
+        # 旧履歴にはファイルの識別情報がない。推定で版を表示しない。
+        turbo_value = "記録なし" if req.get("turbo") else None
     chips = [
         ("モード", h3lib.MODES.get(r.get("mode", "t2va")),
          MODE_HELP.get(r.get("mode", "t2va"))),
@@ -339,6 +351,9 @@ def card_html(r, media_prefix="../", interactive=False):
          "拡散のステップ数。turbo使用時は6〜8が推奨"),
         ("turbo", "あり" if req.get("turbo") else "なし",
          "4ステップ蒸留LoRA。速いが動きが激しいと残像が出る"),
+        ("Turbo LoRA", turbo_value,
+         f"SHA-256: {turbo_hash}" if turbo_hash else
+         "旧履歴には使用ファイルの識別情報がない"),
         ("品質優先", "あり" if req.get("fast") is False else None,
          "アテンション再利用をやめた状態。約4倍の時間がかかるがメモリは減る"),
         ("LoRA", "・".join(f"{Path(l['path']).stem} {l.get('scale', 1.0)}"

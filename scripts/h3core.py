@@ -7,6 +7,7 @@ mlx-serve の /v1/video/generations は base64 の rgb8 フレームと pcm_s16l
 """
 
 import base64
+import hashlib
 import json
 import re
 import shutil
@@ -25,6 +26,11 @@ INHERITED = ("prompt", "frames", "width", "height", "steps", "seed", "turbo",
              "fast", "chain_windows")
 FALLBACK = {"frames": 124, "width": 1024, "height": 768, "steps": 6,
             "seed": 7, "turbo": True, "fast": True, "chain_windows": 1}
+# REF2VA は別チェックポイントで、FL2VA パック同梱の Turbo LoRA を流用しない。
+# 対応 LoRA を明示的に導入するまでは、mlx-serve の Base 既定で始める。
+MODE_FALLBACK = {
+    "ref2va": {"steps": 30, "turbo": False},
+}
 MAX_CHAIN = 6      # サーバ側の上限
 MAX_LORAS = 7      # 実際は8枠だが turbo が1枠を使う
 
@@ -38,6 +44,55 @@ REF_VIDEO_FRAMES = 17      # 参照動画から抜くコマ数（VAEの1クリ�
 
 class GenerationError(RuntimeError):
     pass
+
+
+def defaults_for(mode):
+    """共通値に、そのモード固有の安全な既定値を重ねて返す。"""
+    defaults = dict(FALLBACK)
+    defaults.update(MODE_FALLBACK.get(mode, {}))
+    return defaults
+
+
+def _sha256(path, chunk_size=1024 * 1024):
+    """大きなLoRAをメモリへ載せずに識別する。"""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def turbo_lora_info(mode):
+    """リクエスト時点で選択されるTurbo LoRAの識別情報を返す。
+
+    mlx-serve は各モデルパック直下の `turbo_lora.safetensors` を読む。
+    シンボリックリンクで版を切り替えても追跡できるよう、入口と解決先を
+    両方記録する。サーバの応答を待つ前に呼ぶため、失敗した生成にも残せる。
+    """
+    pack = h3lib.pack_for(mode)
+    configured = h3lib.MODELS_DIR / pack / "turbo_lora.safetensors"
+    info = {
+        "model_pack": pack,
+        "configured_path": h3lib.rel(configured),
+    }
+    if not configured.is_file():
+        info["status"] = "missing"
+        return info
+
+    try:
+        resolved = configured.resolve()
+        stat = resolved.stat()
+        info.update({
+            "status": "found",
+            "filename": resolved.name,
+            "resolved_path": h3lib.rel(resolved),
+            "sha256": _sha256(resolved),
+            "size_bytes": stat.st_size,
+        })
+    except OSError as err:
+        # 識別情報を読めない場合も生成履歴自体は失わない。
+        info.update({"status": "unreadable", "error": str(err)})
+    return info
 
 
 def slug(prompt, words=4):
@@ -293,8 +348,9 @@ def mode_of(params):
     """入力の有無から生成モードを決める。"""
     if params.get("refs"):
         return "ref2va"
-    has_first = bool(params.get("first_frame_b64"))
-    has_last = bool(params.get("last_frame_b64"))
+    # CLIでは画像を読む前に既定値を選ぶため、パス指定も入力として数える。
+    has_first = bool(params.get("first_frame_b64") or params.get("first_frame_path"))
+    has_last = bool(params.get("last_frame_b64") or params.get("last_frame_path"))
     if has_first and has_last:
         return "interp"
     if has_first or has_last:
@@ -315,7 +371,10 @@ def read_image_b64(path):
 def normalize(params):
     """欠けている項目を既定値で埋め、値の妥当性を確かめる。"""
     p = dict(params)
-    for key, value in FALLBACK.items():
+    # 入力から先にパーティションを決めないと、REF2VA に FL2VA/Turbo の
+    # 共通既定値を入れてしまう。モード固有値は欠けている項目だけに適用する。
+    p["mode"] = mode_of(p)
+    for key, value in defaults_for(p["mode"]).items():
         if p.get(key) is None:
             p[key] = value
     if not p.get("prompt"):
@@ -334,8 +393,6 @@ def normalize(params):
     for key in ("first_frame", "last_frame"):
         if p.get(key + "_path") and not p.get(key + "_b64"):
             p[key + "_b64"], p[key + "_ext"] = read_image_b64(p[key + "_path"])
-    p["mode"] = mode_of(p)
-
     # REF2VA と FL2VA は別のDiTなので、片方の機能はもう片方では使えない。
     # サーバも400で拒否するが、待たされる前にこちらで止める。
     if p["mode"] == "ref2va":
@@ -380,6 +437,7 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
         "status": "ok", "mode": p["mode"], "label": p["label"],
         "prompt": p["prompt"],
         "requested": {k: p[k] for k in INHERITED},
+        "turbo_lora": turbo_lora_info(p["mode"]) if p.get("turbo") else None,
         "loras": p.get("loras") or [],
         "refs": p.get("refs") or [],
         "ref_image_size": p.get("ref_image_size") if p.get("refs") else None,
@@ -408,7 +466,8 @@ def run(params, port=DEFAULT_PORT, timeout=7200, on_progress=None):
     out_path = p.get("out") or h3lib.OUTPUT_DIR / f"{rec_id}_{p['label']}.mp4"
     try:
         meta = {"id": rec_id, "prompt": p["prompt"],
-                "requested": record["requested"], "effective": record["effective"]}
+                "requested": record["requested"], "effective": record["effective"],
+                "turbo_lora": record["turbo_lora"], "loras": record["loras"]}
         mux(ev, out_path, meta)
     except (GenerationError, subprocess.CalledProcessError) as err:
         record["status"] = "error"

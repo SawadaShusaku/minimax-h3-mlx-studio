@@ -138,6 +138,11 @@ pkill -f 'mlx-serve --model'
 送った値だけでは再現できない。同じ内容が mp4 のコメント欄にも埋め込まれるので、
 動画ファイル単体でも設定が分かる。
 
+Turbo使用時は、モデルパック、`turbo_lora.safetensors` の配置場所、リンク解決先、
+実ファイル名、サイズ、SHA-256も自動記録する。履歴画面には実ファイル名と短縮ハッシュを
+表示し、全ハッシュは `h3hist.py show` または `history.jsonl` で確認できる。旧履歴は
+根拠なく補完せず「記録なし」と表示する。
+
 ```bash
 ./scripts/h3hist.py list                          # 一覧
 ./scripts/h3hist.py list --search watercolor      # プロンプト本文で絞り込み
@@ -199,3 +204,7 @@ Web経路を意図的に対象にしている。参照機能を最初に入れ�
   pcm_s16le ステレオ音声で、mp4 ではない。`h3gen.py` が ffmpeg で束ねている
 - コードのライセンスは MIT。同梱の htmx は Zero-Clause BSD。
   **モデル本体は MiniMax 独自ライセンスで地域制限がある**（冒頭の警告を参照）
+
+## 参考サイト
+- https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills
+- https://github.com/Carasibana/ComfyUI-H3-FaceRefine

@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
+MODELS_DIR = PROJECT / "models" / "ddalcu"
 OUTPUT_DIR = PROJECT / "outputs"
 INPUTS_DIR = PROJECT / "inputs"      # 生成に渡したキーフレーム画像
 HISTORY_DIR = PROJECT / "history"
